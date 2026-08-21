@@ -7,15 +7,27 @@ const colors = {
   "open-gap": "#67e8f9"
 };
 
+function withLayout(nodes) {
+  const columns = [110, 300, 500, 700];
+  return nodes.map((node, index) => {
+    if (node.position) return node;
+    const col = index % columns.length;
+    const row = Math.floor(index / columns.length);
+    return { ...node, position: [columns[col], 80 + row * 145] };
+  });
+}
+
 export function renderResearchGraph(container, graph, onSelect) {
   const width = 820;
-  const height = 620;
-  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
+  const nodes = withLayout(graph.nodes);
+  const height = Math.max(620, 180 + Math.ceil(nodes.length / 4) * 145);
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+
   const edgeMarkup = graph.edges
     .map(([from, to, label]) => {
       const a = nodeById.get(from);
       const b = nodeById.get(to);
-      if (!a || !b || !a.position || !b.position) return "";
+      if (!a || !b) return "";
       const [x1, y1] = a.position;
       const [x2, y2] = b.position;
       const mx = (x1 + x2) / 2;
@@ -24,8 +36,7 @@ export function renderResearchGraph(container, graph, onSelect) {
     })
     .join("");
 
-  const nodeMarkup = graph.nodes
-    .filter((node) => node.position)
+  const nodeMarkup = nodes
     .map((node) => {
       const [x, y] = node.position;
       const fill = colors[node.type] ?? "#94a3b8";
