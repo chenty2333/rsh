@@ -1,0 +1,29 @@
+name: ci
+on:
+  push:
+    branches: [main, "rsh/**"]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
+      - run: npm run check
+      - run: npm pack --dry-run
+      - name: Black-box install and workspace lifecycle
+        run: |
+          PKG=$(npm pack --silent)
+          TMP=$(mktemp -d)
+          cd "$TMP"
+          git init -q
+          npm install "$GITHUB_WORKSPACE/$PKG" --silent
+          ./node_modules/.bin/rsh init --name ci-workspace
+          ./node_modules/.bin/rsh seed gabidulin
+          ./node_modules/.bin/rsh index
+          ./node_modules/.bin/rsh check --ir .rsh/examples/blocked-route.json --json
+          ./node_modules/.bin/rsh doctor
