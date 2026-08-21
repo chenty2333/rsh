@@ -3,6 +3,8 @@ name: mux-promised-selector-audit
 on:
   push:
     branches: [mux-exposed-port-audit-20260821]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
