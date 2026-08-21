@@ -1,0 +1,62 @@
+name: mux-promised-selector-audit
+
+on:
+  push:
+    branches: [mux-exposed-port-audit-20260821]
+  workflow_dispatch:
+
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate exact-synthesis CNF
+        run: |
+          python3 research/promised_selector_mixed.py | tee generator.log
+          head -1 promised_selector_m3_mixed.cnf
+          sha256sum promised_selector_m3_mixed.cnf promised_selector_m3_map.json | tee sha256.txt
+      - name: Build Kissat
+        run: |
+          git clone --depth 1 https://github.com/arminbiere/kissat.git
+          cd kissat
+          ./configure
+          make -C build -j2
+          build/kissat --version
+      - name: Solve and certify
+        shell: bash
+        run: |
+          set +e
+          ./kissat/build/kissat --no-binary promised_selector_m3_mixed.cnf promised_selector_m3.drat > solve.log 2>&1
+          status=$?
+          set -e
+          echo "$status" | tee solver-exit.txt
+          cat solve.log
+          if [ "$status" = 20 ]; then
+            git clone --depth 1 https://github.com/marijnheule/drat-trim.git
+            make -C drat-trim -j2
+            ./drat-trim/drat-trim promised_selector_m3_mixed.cnf promised_selector_m3.drat | tee proof-check.log
+            grep -q 'VERIFIED' proof-check.log
+          elif [ "$status" = 10 ]; then
+            grep '^v ' solve.log > model.txt
+          else
+            echo "Kissat returned neither SAT nor UNSAT" >&2
+            exit 1
+          fi
+      - name: Upload audit artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mux-promised-selector-m3-audit
+          path: |
+            generator.log
+            sha256.txt
+            promised_selector_m3_mixed.cnf
+            promised_selector_m3_map.json
+            promised_selector_m3.drat
+            solve.log
+            solver-exit.txt
+            proof-check.log
+            model.txt
+          if-no-files-found: ignore
+          compression-level: 6
