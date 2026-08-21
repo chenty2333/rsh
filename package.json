@@ -1,0 +1,16 @@
+{
+  "name": "routecheck",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Research static analysis: compile a proof plan, detect logical collisions, and preserve the exploration graph.",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "build": "node scripts/build.mjs",
+    "check": "npm run test && npm run build",
+    "serve": "python3 -m http.server 4173 -d dist"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
