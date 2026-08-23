@@ -11,9 +11,11 @@ rsh import danus /path/to/danus/project
 rsh import danus /path/to/danus/project --traces
 ```
 
-- global memory becomes RSH findings;
-- verified fact files become truth facts;
-- predecessor DAGs are mapped to RSH content IDs;
+- global memory becomes RSH findings with the latest `_status.jsonl` receipt folded in;
+- Danus fact files become `llm_audited` findings by default because the Danus verifier is an LLM, not an independent human or formal checker;
+- facts enter RSH Truth only when `truth_policy.allow_llm_audit_as_truth` is explicitly `true`;
+- predecessor DAGs, glossary mappings, external references, revocations, source paths, and source hashes are preserved;
+- malformed or dependency-incomplete source facts remain awareness/pending and never enter Truth;
 - local worker memory is imported only with `--traces`.
 
 ### Jupyter

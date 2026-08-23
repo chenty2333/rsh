@@ -44,12 +44,12 @@ export function validateRoute(route = {}, label = "route") {
     if (route[key] !== undefined) assert(isStringArray(route[key]), `${label}.${key} must be an array of strings`);
   }
   if (route.quantifiers !== undefined) {
-    assert(route.quantifiers && typeof route.quantifiers === "object", `${label}.quantifiers must be an object`);
+    assert(route.quantifiers && typeof route.quantifiers === "object" && !Array.isArray(route.quantifiers), `${label}.quantifiers must be an object`);
     for (const value of Object.values(route.quantifiers)) {
       assert(typeof value === "string", `${label}.quantifiers values must be strings`);
     }
   }
-  if (route.parameters !== undefined) assert(route.parameters && typeof route.parameters === "object", `${label}.parameters must be an object`);
+  if (route.parameters !== undefined) assert(route.parameters && typeof route.parameters === "object" && !Array.isArray(route.parameters), `${label}.parameters must be an object`);
   return route;
 }
 
@@ -117,8 +117,28 @@ export function validateVerification(record) {
 }
 
 export function validateRouteIR(record) {
-  assert(record && typeof record === "object", "route IR must be an object");
-  if (record.schema !== undefined) assert(record.schema === SCHEMAS.route, `route.schema must be ${SCHEMAS.route}`);
+  assert(record && typeof record === "object" && !Array.isArray(record), "route IR must be a plain object");
+  const prototype = Object.getPrototypeOf(record);
+  assert(prototype === Object.prototype || prototype === null, "route IR must be a plain object");
+  assert(record.schema === SCHEMAS.route, `route.schema must be ${SCHEMAS.route}`);
+  const allowed = new Set([
+    "schema", "title", "raw_text", "targets", "mechanisms", "assumptions", "exclusions", "implicit_claims",
+    "quantifiers", "parameters", "compiler", "provenance"
+  ]);
+  for (const key of Object.keys(record)) assert(allowed.has(key), `route IR contains unsupported field: ${key}`);
+  for (const key of ["targets", "mechanisms", "assumptions", "exclusions", "implicit_claims"]) {
+    assert(Object.hasOwn(record, key), `route IR.${key} is required`);
+    assert(isStringArray(record[key]), `route IR.${key} must be an array of strings`);
+  }
+  for (const key of ["title", "raw_text"]) {
+    if (record[key] !== undefined) assert(typeof record[key] === "string", `route IR.${key} must be a string`);
+  }
+  for (const key of ["compiler", "provenance"]) {
+    if (record[key] !== undefined) {
+      assert(record[key] && typeof record[key] === "object" && !Array.isArray(record[key]), `route IR.${key} must be an object`);
+    }
+  }
   validateRoute(record);
+  validateJsonSerializable(record, "route IR");
   return record;
 }

@@ -58,6 +58,7 @@ rsh log --graph
 ├── events.jsonl
 ├── verifications.jsonl
 ├── revocations.jsonl
+├── locks/           # local single-writer coordination; gitignored
 └── cache/           # derived and gitignored
 ```
 
@@ -70,8 +71,9 @@ rsh init
 rsh status
 rsh orient [query]
 rsh compile <plan>
-rsh check <plan>
 rsh check --ir route.json
+rsh check --command './my-route-compiler' "natural-language plan"
+rsh check --heuristic "natural-language plan" # experimental demo only
 rsh record --file proposal.json
 rsh verify FINDING --verdict accepted --method human_review --authority Alice --payload fact.json
 rsh revoke FACT --reason "audit failure"
@@ -103,13 +105,13 @@ static analyzer
 collision report
 ```
 
-For serious use, an agent should produce typed IR and call:
+Formal preflight accepts only a complete, schema-validated `rsh.route.v1` document. An agent should produce typed IR and call:
 
 ```bash
 rsh check --ir route.json
 ```
 
-The built-in heuristic compiler is deliberately conservative and emits a low-confidence warning.
+Alternatively, `rsh check --command CMD` passes the plan to an explicitly supplied external compiler and validates its JSON output. Natural-language input is never silently compiled during formal checking. The built-in heuristic is available only through the explicit `--heuristic` experimental/demo flag and is low confidence.
 
 ## Preflight outcomes
 
@@ -158,7 +160,7 @@ MCP roles are enforced by the exposed tool surface:
 
 Import is an adapter interface, not a core dependency. Built-ins currently include:
 
-- `danus`: global memory → findings; verified fact graph → facts; optional worker local memory → traces;
+- `danus`: global memory and LLM-verified facts → `llm_audited` findings by default; Truth import requires the explicit `allow_llm_audit_as_truth` workspace override; predecessor DAGs, status receipts, revocations, glossary, references, and source hashes are preserved; optional worker local memory → traces;
 - `jupyter`: cells and outputs → trace layer;
 - `chat`: JSON/JSONL conversations → trace layer;
 - `git`: commit history → trace layer.
@@ -170,6 +172,10 @@ Danus can be a research runtime. RSH is the repository and static analyzer it wr
 **Files and Git are authoritative. Indexes are disposable.**
 
 `rsh index` builds a local BM25-style lexical index and graph lookup cache. An optional external embedding command can add semantic reranking, but embeddings never become a correctness source.
+
+## Local write coordination
+
+Workspace initialization, canonical CLI/MCP writes, and index rebuilds take one workspace-exclusive lock in `.rsh/locks` for the entire operation. This prevents local concurrent writers from interleaving a multi-file update or publishing a stale derived index; lock holders identify their process, host, and acquisition time, and proven dead same-host holders can be reclaimed. RSH intentionally does not claim cross-file transactions, distributed locking, or Git merge conflict resolution. The internal `Store` API is not a concurrent transaction API.
 
 ## Development
 

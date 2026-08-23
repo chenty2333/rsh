@@ -13,22 +13,43 @@ export function appendTrace(file, record) {
 }
 
 export function simpleYamlFrontmatter(text) {
-  if (!text.startsWith("---\n")) return { metadata: {}, body: text };
-  const end = text.indexOf("\n---\n", 4);
-  if (end < 0) return { metadata: {}, body: text };
-  const raw = text.slice(4, end);
+  const opening = text.match(/^---\r?\n/);
+  if (!opening) return { metadata: {}, body: text };
+  const start = opening[0].length;
+  const closing = /\r?\n---(?:\r?\n|$)/g;
+  closing.lastIndex = start;
+  const match = closing.exec(text);
+  if (!match) return { metadata: {}, body: text };
+  const raw = text.slice(start, match.index);
   const metadata = {};
   let activeKey = null;
+
+  const unquote = (value) => value.replace(/^['"]|['"]$/g, "");
+  const parseFlowArray = (value) => {
+    const trimmed = value.trim();
+    if (trimmed === "[]") return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed;
+    } catch {}
+    if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
+    return trimmed.slice(1, -1).split(",").map((item) => unquote(item.trim())).filter(Boolean);
+  };
+
   for (const line of raw.split(/\r?\n/)) {
     if (!line.trim() || line.trim().startsWith("#")) continue;
     const top = line.match(/^([A-Za-z0-9_]+):\s*(.*)$/);
     if (top) {
       activeKey = top[1];
       let value = top[2].trim();
-      if (!value) metadata[activeKey] = [];
+      if (!value) metadata[activeKey] = activeKey === "glossary_introduces" ? {} : [];
       else {
-        try { metadata[activeKey] = JSON.parse(value); }
-        catch { metadata[activeKey] = value.replace(/^['"]|['"]$/g, ""); }
+        const flow = parseFlowArray(value);
+        if (flow) metadata[activeKey] = flow;
+        else {
+          try { metadata[activeKey] = JSON.parse(value); }
+          catch { metadata[activeKey] = unquote(value); }
+        }
       }
       continue;
     }
@@ -36,9 +57,15 @@ export function simpleYamlFrontmatter(text) {
     if (item && activeKey) {
       if (!Array.isArray(metadata[activeKey])) metadata[activeKey] = [];
       metadata[activeKey].push(item[1].trim().replace(/^['"]|['"]$/g, ""));
+      continue;
+    }
+    const mapping = line.match(/^\s{2}([^:]+):\s*(.*)$/);
+    if (mapping && activeKey) {
+      if (!metadata[activeKey] || Array.isArray(metadata[activeKey])) metadata[activeKey] = {};
+      metadata[activeKey][mapping[1].trim()] = unquote(mapping[2].trim());
     }
   }
-  return { metadata, body: text.slice(end + 5).trim() };
+  return { metadata, body: text.slice(match.index + match[0].length).trim() };
 }
 
 export function markdownSections(body) {

@@ -41,7 +41,10 @@ export function submitVerification(store, input) {
   }
 
   const accepted = new Set(store.workspace.truth_policy?.accepted_methods ?? []);
-  if (record.method === "llm_audit" && store.workspace.truth_policy?.allow_llm_audit_as_truth) accepted.add("llm_audit");
+  if (record.method === "llm_audit") {
+    if (store.workspace.truth_policy?.allow_llm_audit_as_truth === true) accepted.add("llm_audit");
+    else accepted.delete("llm_audit");
+  }
   if (!accepted.has(record.method)) {
     const metadata = { ...finding.metadata, state: "supported", updated_at: record.at };
     validateFinding(metadata);

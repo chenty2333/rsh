@@ -70,6 +70,7 @@ Stored as `.rsh/facts/<fact-id>.md`.
 ```
 
 Verification state, evidence grade, and mathematical resolution are intentionally separate.
+`llm_audited` is the evidence grade for an LLM verifier judgment; it must not be represented as `independently_reviewed` or `formal`.
 
 ## Evidence record
 

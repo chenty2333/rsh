@@ -19,10 +19,11 @@ Common options:
 
 - `rsh orient [QUERY]`
 - `rsh compile <PLAN>`
-- `rsh check <PLAN>`
 - `rsh check --ir route.json`
+- `rsh check --command CMD [PLAN|--file FILE]`
+- `rsh check --heuristic [PLAN|--file FILE]` (experimental/demo only; low confidence)
 
-Use `--strict` with `rsh check` when a blocked route must fail automation. A blocked strict check exits with status 2.
+Formal `rsh check` accepts exactly one typed input mode: `--ir`, or `--command` whose JSON output validates as complete `rsh.route.v1` IR. It does not silently use a workspace compiler setting or natural-language heuristic. `--heuristic` is the explicit experimental opt-in for a low-confidence demo. Conflicting or missing modes are usage errors. Use `--strict` with any check mode when a blocked route must fail automation. A blocked strict check exits with status 2.
 
 ## State changes
 
@@ -44,6 +45,14 @@ Use `--strict` with `rsh check` when a blocked route must fail automation. A blo
 - `rsh import list`
 - `rsh import ADAPTER SOURCE`
 - `rsh mcp --role agent|verifier|operator`
+
+`rsh_check` in MCP likewise requires an `ir` object with schema `rsh.route.v1`; it does not accept text fallback.
+
+`rsh diff` reports object-level finding/fact changes, promotions, active↔revoked transitions, and Truth Graph `DEPENDS_ON` additions/removals. With no refs it compares `HEAD` to the worktree; with one ref it compares that ref to `HEAD`; with two refs it reads both Git snapshots without checkout.
+
+## Local writers
+
+Initialization, `record`, `verify`, `revoke`, `import`, `seed`, index rebuilds, and the corresponding MCP writes serialize the entire operation with a workspace lock under `.rsh/locks`. The lock is local single-writer coordination, not a cross-file transaction or distributed lock.
 
 ## Exit status
 

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { spawnSync } from "node:child_process";
 import { writeJsonAtomic, readJson } from "./fs.js";
 import { buildGraph } from "./graph.js";
+import { withWorkspaceWriteLock } from "./write-lock.js";
 
 const STOP = new Set(["the","a","an","and","or","of","to","in","for","on","with","is","are","be","this","that","as","by","from","at","it","we","our"]);
 
@@ -25,7 +26,7 @@ function revokedFactIds(store) {
   return [...new Set(store.revocations().map((item) => item.fact_id).filter((id) => typeof id === "string"))].sort();
 }
 
-export function buildIndex(store, options = {}) {
+function buildIndexUnlocked(store, options = {}) {
   const graph = buildGraph(store);
   const docs = [];
   const df = new Map();
@@ -55,6 +56,10 @@ export function buildIndex(store, options = {}) {
   if (command) buildEmbeddings(store, docs, command);
   store.event("INDEX_REBUILT", { documents: docs.length, embeddings: Boolean(command) });
   return index;
+}
+
+export function buildIndex(store, options = {}) {
+  return withWorkspaceWriteLock(store.root, () => buildIndexUnlocked(store, options));
 }
 
 function buildEmbeddings(store, docs, command) {

@@ -16,6 +16,7 @@ import { doctor } from "./core/doctor.js";
 import { seedGabidulin } from "./core/seed.js";
 import { listImporters, runImporter } from "./importers/index.js";
 import { runMcp } from "./core/mcp.js";
+import { withWorkspaceWriteLock } from "./core/write-lock.js";
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require("../package.json");
@@ -25,6 +26,7 @@ const BOOLEAN_FLAGS = new Set([
   "force",
   "graph",
   "help",
+  "heuristic",
   "json",
   "replace",
   "strict",
@@ -72,7 +74,7 @@ const COMMANDS = new Set([
 const GLOBAL_FLAGS = new Set(["help", "version"]);
 
 const COMMAND_FLAGS = {
-  check: new Set(["command", "file", "ir", "json", "strict"]),
+  check: new Set(["command", "file", "heuristic", "ir", "json", "strict"]),
   compile: new Set(["command", "file", "json"]),
   diff: new Set(["json"]),
   doctor: new Set(["json"]),
@@ -165,8 +167,11 @@ function validatePositionals(command, positional, flags) {
   if (["check", "compile"].includes(command) && (flags.file || flags.ir) && positional.length) {
     throw new Error(`Command ${command} does not accept plan text together with --${flags.ir ? "ir" : "file"}`);
   }
-  if (command === "check" && flags.ir && (flags.file || flags.command)) {
-    throw new Error("Command check does not accept --ir together with --file or --command");
+  if (command === "check") {
+    const modes = [flags.ir && "--ir", flags.command && "--command", flags.heuristic && "--heuristic"].filter(Boolean);
+    if (modes.length === 0) throw new Error("rsh check requires typed IR via --ir FILE or --command CMD. Use --heuristic only for the experimental low-confidence demo mode.");
+    if (modes.length > 1) throw new Error(`rsh check accepts exactly one input mode; received ${modes.join(", ")}`);
+    if (flags.ir && (flags.file || positional.length)) throw new Error("rsh check --ir does not accept plan text or --file");
   }
   if (command === "import" && positional[0] === "list" && positional.length > 1) {
     throw new Error("Command import list does not accept additional positional arguments");
@@ -237,7 +242,7 @@ function formatAnalysis(result) {
 }
 
 function help() {
-  return `RSH ${VERSION} — private-first Research Git\n\nUsage:\n  rsh init [--name NAME] [--force]\n  rsh status [--json]\n  rsh orient [QUERY] [--json]\n  rsh compile <PLAN|--file FILE> [--json]\n  rsh check <PLAN> [--ir FILE] [--strict] [--json]\n  rsh record --file PROPOSAL.json [--replace]\n  rsh verify FINDING --verdict accepted|rejected|inconclusive --method METHOD --authority NAME [--payload FILE]\n  rsh revoke FACT --reason TEXT [--authority NAME]\n  rsh get ID [--json]\n  rsh relations [ID] [--json]\n  rsh log [--graph]\n  rsh diff [FROM] [TO] [--json]\n  rsh index [--embedding-command CMD]\n  rsh import list\n  rsh import ADAPTER SOURCE [--traces]\n  rsh seed gabidulin\n  rsh doctor [--json]\n  rsh mcp [--role agent|verifier|operator]\n\nCore workflow:\n  orient → check → research → record → verify\n`;
+  return `RSH ${VERSION} — private-first Research Git\n\nUsage:\n  rsh init [--name NAME] [--force]\n  rsh status [--json]\n  rsh orient [QUERY] [--json]\n  rsh compile <PLAN|--file FILE> [--json]\n  rsh check --ir FILE [--strict] [--json]\n  rsh check --command CMD [PLAN|--file FILE] [--strict] [--json]\n  rsh check --heuristic [PLAN|--file FILE] [--strict] [--json]  # experimental, low confidence\n  rsh record --file PROPOSAL.json [--replace]\n  rsh verify FINDING --verdict accepted|rejected|inconclusive --method METHOD --authority NAME [--payload FILE]\n  rsh revoke FACT --reason TEXT [--authority NAME]\n  rsh get ID [--json]\n  rsh relations [ID] [--json]\n  rsh log [--graph]\n  rsh diff [FROM] [TO] [--json]\n  rsh index [--embedding-command CMD]\n  rsh import list\n  rsh import ADAPTER SOURCE [--traces]\n  rsh seed gabidulin\n  rsh doctor [--json]\n  rsh mcp [--role agent|verifier|operator]\n\nCore workflow:\n  orient → check → research → record → verify\n`;
 }
 
 export async function main(argv) {
@@ -290,8 +295,7 @@ export async function main(argv) {
     if (flags.ir) ir = loadRouteIR(flags.ir);
     else {
       const raw = flags.file ? fs.readFileSync(flags.file, "utf8") : positional.join(" ") || readInput("-");
-      const compilerCommand = flags.command ?? store.workspace.compiler?.command;
-      ir = compilerCommand ? compileWithCommand(compilerCommand, raw, root) : heuristicCompile(raw);
+      ir = flags.command ? compileWithCommand(flags.command, raw, root) : heuristicCompile(raw);
     }
     const result = analyzeRoute(store, ir);
     jsonOrPretty({ route: ir, analysis: result }, flags, (value) => `${value.route.compiler?.warnings?.join("\n") ?? ""}${value.route.compiler?.warnings?.length ? "\n\n" : ""}${formatAnalysis(value.analysis)}`);
@@ -302,28 +306,28 @@ export async function main(argv) {
     const file = flags.file ?? positional[0];
     if (!file) throw new Error("rsh record requires --file PROPOSAL.json");
     const proposal = JSON.parse(readInput(file));
-    jsonOrPretty(applyProposal(store, proposal, { replace: Boolean(flags.replace) }), flags);
+    jsonOrPretty(withWorkspaceWriteLock(root, () => applyProposal(store, proposal, { replace: Boolean(flags.replace) })), flags);
     return;
   }
   if (command === "verify") {
     const finding_id = positional[0];
     if (!finding_id) throw new Error("rsh verify requires a finding id");
     const payload = flags.payload ? JSON.parse(readInput(flags.payload)) : {};
-    const result = submitVerification(store, {
+    const result = withWorkspaceWriteLock(root, () => submitVerification(store, {
       ...payload,
       finding_id,
       verdict: flags.verdict ?? payload.verdict,
       method: flags.method ?? payload.method,
       authority: flags.authority ?? payload.authority,
       force: Boolean(flags.force)
-    });
+    }));
     jsonOrPretty(result, flags);
     return;
   }
   if (command === "revoke") {
     const fact = positional[0];
     if (!fact || !flags.reason) throw new Error("rsh revoke requires FACT --reason TEXT");
-    jsonOrPretty({ revoked: cascadeRevoke(store, fact, flags.reason, flags.authority ?? "operator") }, flags);
+    jsonOrPretty({ revoked: withWorkspaceWriteLock(root, () => cascadeRevoke(store, fact, flags.reason, flags.authority ?? "operator")) }, flags);
     return;
   }
   if (command === "get") {
@@ -352,12 +356,12 @@ export async function main(argv) {
     const adapter = positional.shift();
     if (!adapter || adapter === "list") { console.log(listImporters().join("\n")); return; }
     const source = path.resolve(positional.shift() ?? ".");
-    jsonOrPretty(runImporter(adapter, store, source, { traces: Boolean(flags.traces), allowMissingPredecessors: Boolean(flags["allow-missing-predecessors"]), limit: flags.limit ? Number(flags.limit) : undefined }), flags);
+    jsonOrPretty(withWorkspaceWriteLock(root, () => runImporter(adapter, store, source, { traces: Boolean(flags.traces), allowMissingPredecessors: Boolean(flags["allow-missing-predecessors"]), limit: flags.limit ? Number(flags.limit) : undefined })), flags);
     return;
   }
   if (command === "seed") {
     if (positional[0] !== "gabidulin") throw new Error("Available seed: gabidulin");
-    jsonOrPretty(seedGabidulin(store), flags);
+    jsonOrPretty(withWorkspaceWriteLock(root, () => seedGabidulin(store)), flags);
     return;
   }
   if (command === "doctor") {

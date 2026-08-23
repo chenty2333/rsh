@@ -79,7 +79,7 @@ export function heuristicCompile(rawText, options = {}) {
     compiler: {
       mode: "heuristic",
       confidence: "low",
-      warnings: ["Heuristic compilation is a fallback. For serious preflight, supply model-compiled IR with `rsh check --ir`." ]
+      warnings: ["Heuristic compilation is an experimental demo. For serious preflight, supply model-compiled IR with `rsh check --ir`." ]
     }
   });
 }
@@ -99,13 +99,11 @@ export function compileWithCommand(command, rawText, cwd) {
   } catch (error) {
     throw new Error(`Compiler command did not return JSON: ${error.message}`);
   }
-  parsed.schema ??= SCHEMAS.route;
-  parsed.compiler = { mode: "external_command", command };
-  return validateRouteIR(parsed);
+  const route = validateRouteIR(parsed);
+  return validateRouteIR({ ...route, compiler: { ...(route.compiler ?? {}), mode: "external_command", command } });
 }
 
 export function loadRouteIR(file) {
   const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-  parsed.schema ??= SCHEMAS.route;
   return validateRouteIR(parsed);
 }

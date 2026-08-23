@@ -14,6 +14,7 @@ test("Danus importer keeps global memory unverified and preserves verified fact 
   fs.writeFileSync(path.join(source, "fact_graph", "facts", "f1.md"), `---\nfact_id: f1\nproblem_id: p\nauthor: w1\npredecessors: []\n---\n\n## statement\nRoot lemma\n\n## proof\nRoot proof\n`);
   fs.writeFileSync(path.join(source, "fact_graph", "facts", "f2.md"), `---\nfact_id: f2\nproblem_id: p\nauthor: w2\npredecessors:\n  - f1\n---\n\n## statement\nChild lemma\n\n## proof\nUses root\n`);
   const { store } = tempWorkspace("danus");
+  store.workspace.truth_policy.allow_llm_audit_as_truth = true;
   const result = runImporter("danus", store, source);
   assert.equal(result.findings.length, 1);
   assert.equal(store.readFinding("danus-d1").metadata.trust, "finding");

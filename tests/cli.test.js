@@ -15,10 +15,10 @@ test("global version comes from package metadata", () => {
   assert.equal(result.stdout.trim(), packageJson.version);
 });
 
-test("boolean strict does not consume the following plan", () => {
+test("boolean strict does not consume the following heuristic demo plan", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rsh-strict-"));
   runCli(root, ["init"]);
-  const result = runCli(root, ["check", "--strict", "novel approach", "--json"]);
+  const result = runCli(root, ["check", "--strict", "--heuristic", "novel approach", "--json"]);
   assert.equal(JSON.parse(result.stdout).route.raw_text, "novel approach");
 
   const literal = runCli(root, ["compile", "--json", "--", "--literal-plan"]);

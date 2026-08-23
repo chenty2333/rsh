@@ -36,7 +36,7 @@ Workspace-accepted facts and their `DEPENDS_ON` DAG. It answers: **what may down
 
 ## Compiler and analyzer
 
-The semantic compiler is model-powered. It extracts targets, mechanisms, assumptions, exclusions, quantifiers, parameters, and implicit claims into `rsh.route.v1` IR.
+The semantic compiler is model-powered. It extracts targets, mechanisms, assumptions, exclusions, quantifiers, parameters, and implicit claims into complete `rsh.route.v1` IR. Formal CLI checks accept an IR file or an explicitly named external compiler command, then validate the exact schema before analysis. MCP `rsh_check` requires the IR object directly. The natural-language heuristic is available only through the explicit experimental `--heuristic` CLI mode and is not a formal fallback.
 
 The static analyzer is deterministic where possible. It performs:
 
@@ -60,6 +60,10 @@ Retrieval is graph-first:
 4. raw evidence only when necessary.
 
 The derived index is not authoritative.
+
+## Local writer boundary
+
+Workspace initialization, product write entrances, and derived-index rebuilds take a workspace-exclusive lock in `.rsh/locks` around the full compound operation. This supplies single-writer serialization on one host, including safe reclamation only for a proven dead same-host owner. It is deliberately not a cross-file transaction: a process crash can leave a partially completed compound operation, and the internal `Store` methods are not exposed as a concurrent transaction API. Cached read paths remain unlocked when no rebuild is needed.
 
 Revoked truth facts remain in the historical graph for audit and cascade analysis, but active retrieval views exclude them. Findings that produced a revoked fact remain visible as exploration history and carry an explicit promoted-truth status.
 
@@ -87,4 +91,4 @@ Truth is revocable; history is not rewritten. Revoking a fact cascades through a
 
 ## Import boundary
 
-Importers produce proposed deltas into the same model. Importing a source never silently upgrades unverified memory to truth. Verified external fact graphs may enter as `imported_verified` facts with provenance.
+Importers produce proposed deltas into the same model. Importing a source never silently upgrades unverified memory to truth. In particular, Danus facts are `llm_audited` awareness by default; only the explicit workspace LLM-truth override permits them to enter Truth with that exact method and evidence grade.

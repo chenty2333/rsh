@@ -4,11 +4,12 @@ import { Store } from "./store.js";
 import { workspaceStatus, graphLog } from "./status.js";
 import { orient } from "./orient.js";
 import { analyzeRoute } from "./analyzer.js";
-import { heuristicCompile } from "./route.js";
+import { validateRouteIR } from "./schema.js";
 import { applyProposal } from "./record.js";
 import { submitVerification, cascadeRevoke } from "./facts.js";
 import { semanticDiff } from "./diff.js";
 import { doctor } from "./doctor.js";
+import { withWorkspaceWriteLock } from "./write-lock.js";
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require("../../package.json");
@@ -22,7 +23,7 @@ const ROLE_TOOLS = {
 const TOOL_SCHEMAS = {
   rsh_status: ["Read workspace status.", {}],
   rsh_orient: ["Retrieve a graph-first research packet for a goal.", { query: { type: "string" }, limit: { type: "number" } }],
-  rsh_check: ["Run preflight static analysis on typed route IR or fallback text.", { ir: { type: "object" }, text: { type: "string" } }],
+  rsh_check: ["Run preflight static analysis on required typed rsh.route.v1 IR.", { ir: { type: "object" } }],
   rsh_get: ["Read one research object by id.", { id: { type: "string" } }],
   rsh_relations: ["List typed research relations, optionally touching one id.", { id: { type: "string" } }],
   rsh_propose_finding: ["Write unverified findings/evidence/relations into the exploration graph.", { proposal: { type: "object" } }],
@@ -36,7 +37,7 @@ const TOOL_SCHEMAS = {
 function toolsFor(role) {
   return (ROLE_TOOLS[role] ?? ROLE_TOOLS.agent).map((name) => {
     const [description, properties] = TOOL_SCHEMAS[name];
-    return { name, description, inputSchema: { type: "object", properties, additionalProperties: true } };
+    return { name, description, inputSchema: { type: "object", properties, required: name === "rsh_check" ? ["ir"] : [], additionalProperties: true } };
   });
 }
 
@@ -45,12 +46,14 @@ function callTool(store, role, name, args = {}) {
   switch (name) {
     case "rsh_status": return workspaceStatus(store);
     case "rsh_orient": return orient(store, args.query ?? "", { limit: args.limit });
-    case "rsh_check": return analyzeRoute(store, args.ir ?? heuristicCompile(args.text ?? ""));
+    case "rsh_check":
+      if (!Object.hasOwn(args, "ir")) throw new Error("rsh_check requires an ir object with schema rsh.route.v1; natural-language text is not accepted.");
+      return analyzeRoute(store, validateRouteIR(args.ir));
     case "rsh_get": return store.get(args.id);
     case "rsh_relations": return args.id ? store.edges().filter((edge) => edge.from === args.id || edge.to === args.id) : store.edges();
-    case "rsh_propose_finding": return applyProposal(store, args.proposal ?? args);
-    case "rsh_submit_verdict": return submitVerification(store, args.verdict ?? args);
-    case "rsh_revoke": return cascadeRevoke(store, args.fact_id, args.reason, args.authority ?? "operator");
+    case "rsh_propose_finding": return withWorkspaceWriteLock(store.root, () => applyProposal(store, args.proposal ?? args));
+    case "rsh_submit_verdict": return withWorkspaceWriteLock(store.root, () => submitVerification(store, args.verdict ?? args));
+    case "rsh_revoke": return withWorkspaceWriteLock(store.root, () => cascadeRevoke(store, args.fact_id, args.reason, args.authority ?? "operator"));
     case "rsh_diff": return semanticDiff(store.root, args.from, args.to ?? "HEAD");
     case "rsh_log": return { graph: graphLog(store) };
     case "rsh_doctor": return doctor(store);

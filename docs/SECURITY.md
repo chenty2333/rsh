@@ -15,6 +15,7 @@ RSH provides state integrity and provenance; it does not make an LLM infallible.
 - object IDs are restricted to safe single path segments before reaching file storage;
 - imported Danus global memory remains unverified;
 - derived indexes do not mutate canonical research state.
+- product-facing CLI and MCP canonical-state writes are serialized by a local workspace-exclusive lock; stale locks are reclaimed only when their same-host owner is provably dead.
 
 ## What still requires judgment
 
@@ -29,6 +30,10 @@ The workspace settings `compiler.command` and `retrieval.embedding_command`, tog
 
 ## Recommended policies
 
-For serious mathematics, keep `llm_audit` out of `truth_policy.accepted_methods`. Use it to produce verification receipts and repair hints, then require independent human review, reproduction, or formal verification for Truth Graph admission.
+For serious mathematics, keep `truth_policy.allow_llm_audit_as_truth` false. Listing `llm_audit` in `accepted_methods` alone does not enable promotion. Use LLM audits to produce support and repair hints, then require independent human review, reproduction, or formal verification for Truth Graph admission.
 
 Private research remains local by default. RSH contains no automatic upload or cloud synchronization.
+
+## Concurrency boundary
+
+The local lock under `.rsh/locks` prevents concurrent local product writers and index rebuilds from interleaving one compound operation. It is not a distributed lock, cross-file transaction, Git merge mechanism, or protection for callers that invoke internal `Store` methods directly. A crash during a write can still leave partial canonical state, so inspect and repair that state before relying on it.

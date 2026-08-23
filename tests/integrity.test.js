@@ -204,6 +204,20 @@ test("non-truth LLM audit still records support without promotion", () => {
   assert.equal(store.listFacts().length, 0);
 });
 
+test("LLM audit requires the explicit truth override even if accepted_methods lists it", () => {
+  const { store } = tempWorkspace("llm-explicit-override");
+  store.workspace.truth_policy.accepted_methods.push("llm_audit");
+  addFinding(store, "LLM-POLICY");
+  const result = submitVerification(store, {
+    finding_id: "LLM-POLICY",
+    verdict: "accepted",
+    method: "llm_audit",
+    authority: "model"
+  });
+  assert.equal(result.promoted, false);
+  assert.equal(store.listFacts().length, 0);
+});
+
 test("cascade revocation ignores exploration nodes that use DEPENDS_ON edges", () => {
   const { store } = tempWorkspace("exploration-dependency");
   addFinding(store, "ROOT");

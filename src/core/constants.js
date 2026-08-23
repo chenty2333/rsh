@@ -82,6 +82,7 @@ export const EVIDENCE_GRADES = new Set([
   "argument",
   "executable",
   "reproduced",
+  "llm_audited",
   "independently_reviewed",
   "formal"
 ]);
