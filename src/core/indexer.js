@@ -21,26 +21,34 @@ function documentText(node) {
     .join("\n");
 }
 
+function revokedFactIds(store) {
+  return [...new Set(store.revocations().map((item) => item.fact_id).filter((id) => typeof id === "string"))].sort();
+}
+
 export function buildIndex(store, options = {}) {
   const graph = buildGraph(store);
   const docs = [];
   const df = new Map();
   for (const [id, node] of graph.nodes) {
+    if (node.layer === "truth" && node.truth_status === "revoked") continue;
     const text = documentText(node);
     const tokens = tokenize(text);
     const tf = {};
     for (const token of tokens) tf[token] = (tf[token] ?? 0) + 1;
     for (const token of new Set(tokens)) df.set(token, (df.get(token) ?? 0) + 1);
-    docs.push({ id, layer: node.layer, kind: node.kind, title: node.title ?? id, state: node.state ?? node.verification?.state ?? null, text, length: tokens.length, tf });
+    docs.push({ id, layer: node.layer, kind: node.kind, title: node.title ?? id, state: node.state ?? node.verification?.state ?? null, truth_status: node.truth_status ?? null, promoted_fact_ids: node.promoted_fact_ids ?? [], promoted_truth_status: node.promoted_truth_status ?? null, text, length: tokens.length, tf });
   }
   const avgdl = docs.length ? docs.reduce((sum, item) => sum + item.length, 0) / docs.length : 0;
+  const indexedIds = new Set(docs.map((item) => item.id));
   const index = {
     schema: "rsh.index.v1",
     built_at: new Date().toISOString(),
     documents: docs,
     document_frequency: Object.fromEntries(df),
     average_document_length: avgdl,
-    edges: graph.edges
+    revoked_truth_included: false,
+    revoked_fact_ids: revokedFactIds(store),
+    edges: graph.edges.filter((edge) => indexedIds.has(edge.from) && indexedIds.has(edge.to))
   };
   writeJsonAtomic(store.paths.index, index);
   const command = options.embeddingCommand ?? store.workspace.retrieval?.embedding_command;
@@ -65,7 +73,12 @@ function buildEmbeddings(store, docs, command) {
 
 export function loadIndex(store) {
   if (!fs.existsSync(store.paths.index)) return buildIndex(store);
-  return readJson(store.paths.index);
+  const index = readJson(store.paths.index);
+  const currentRevokedFactIds = revokedFactIds(store);
+  const indexedRevokedFactIds = Array.isArray(index.revoked_fact_ids) ? index.revoked_fact_ids : null;
+  const revocationsMatch = indexedRevokedFactIds !== null
+    && JSON.stringify(indexedRevokedFactIds) === JSON.stringify(currentRevokedFactIds);
+  return index.revoked_truth_included === false && revocationsMatch ? index : buildIndex(store);
 }
 
 function cosine(a, b) {
@@ -82,21 +95,31 @@ function cosine(a, b) {
 
 export function searchIndex(store, query, options = {}) {
   const index = loadIndex(store);
+  const revoked = new Set(revokedFactIds(store));
+  const graph = buildGraph(store, { includeRevoked: false });
   const tokens = tokenize(query);
   const n = index.documents.length || 1;
   const k1 = 1.2;
   const b = 0.75;
-  const scored = index.documents.map((doc) => {
-    let score = 0;
-    for (const token of tokens) {
-      const tf = doc.tf[token] ?? 0;
-      if (!tf) continue;
-      const df = index.document_frequency[token] ?? 0;
-      const idf = Math.log(1 + (n - df + 0.5) / (df + 0.5));
-      score += idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc.length / (index.average_document_length || 1))));
-    }
-    return { ...doc, lexical_score: score };
-  });
+  const scored = index.documents
+    .filter((doc) => doc.layer !== "truth" || !revoked.has(doc.id))
+    .map((doc) => {
+      const node = graph.nodes.get(doc.id);
+      let score = 0;
+      for (const token of tokens) {
+        const tf = doc.tf[token] ?? 0;
+        if (!tf) continue;
+        const df = index.document_frequency[token] ?? 0;
+        const idf = Math.log(1 + (n - df + 0.5) / (df + 0.5));
+        score += idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc.length / (index.average_document_length || 1))));
+      }
+      return {
+        ...doc,
+        promoted_fact_ids: node?.promoted_fact_ids ?? doc.promoted_fact_ids ?? [],
+        promoted_truth_status: node?.promoted_truth_status ?? doc.promoted_truth_status ?? null,
+        lexical_score: score
+      };
+    });
   let embeddingScores = new Map();
   if (options.queryVector && fs.existsSync(store.paths.embeddings)) {
     const embeddings = readJson(store.paths.embeddings);

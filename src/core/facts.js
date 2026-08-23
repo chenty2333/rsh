@@ -1,7 +1,8 @@
 import { canonicalJson, normalizeWhitespace, shortHash } from "./canonical.js";
 import { SCHEMAS, VERIFIABLE_FINDING_KINDS } from "./constants.js";
-import { validateVerification } from "./schema.js";
+import { validateEdge, validateFact, validateFinding, validateObjectId, validateVerification } from "./schema.js";
 import { buildGraph } from "./graph.js";
+import { serializeDocument } from "./doc.js";
 
 export function computeFactId({ problem_id, predecessors = [], glossary = {}, statement, proof }) {
   return shortHash(canonicalJson({
@@ -14,8 +15,10 @@ export function computeFactId({ problem_id, predecessors = [], glossary = {}, st
 }
 
 export function submitVerification(store, input) {
-  const finding = store.readFinding(input.finding_id);
-  if (!finding) throw new Error(`Finding ${input.finding_id} not found`);
+  const findingId = validateObjectId(input.finding_id, "verification.finding_id");
+  const finding = store.readFinding(findingId);
+  if (!finding) throw new Error(`Finding ${findingId} not found`);
+  validateFinding(finding.metadata);
   const record = validateVerification({
     schema: SCHEMAS.verification,
     verification_id: input.verification_id ?? `V-${Date.now()}`,
@@ -28,10 +31,11 @@ export function submitVerification(store, input) {
     repair_hints: input.repair_hints ?? [],
     evidence_refs: input.evidence_refs ?? []
   });
-  store.verification(record);
 
   if (record.verdict !== "accepted") {
     const metadata = { ...finding.metadata, state: record.verdict === "rejected" ? "refuted" : "challenged", updated_at: record.at };
+    validateFinding(metadata);
+    store.verification(record);
     store.writeFinding(metadata, finding.sections, { replace: true });
     return { verification: record, fact: null, promoted: false };
   }
@@ -40,6 +44,8 @@ export function submitVerification(store, input) {
   if (record.method === "llm_audit" && store.workspace.truth_policy?.allow_llm_audit_as_truth) accepted.add("llm_audit");
   if (!accepted.has(record.method)) {
     const metadata = { ...finding.metadata, state: "supported", updated_at: record.at };
+    validateFinding(metadata);
+    store.verification(record);
     store.writeFinding(metadata, finding.sections, { replace: true });
     return { verification: record, fact: null, promoted: false, reason: `Verification method ${record.method} is not accepted by workspace truth policy` };
   }
@@ -49,6 +55,8 @@ export function submitVerification(store, input) {
   }
 
   const predecessors = input.predecessors ?? finding.metadata.predecessors ?? [];
+  if (!Array.isArray(predecessors)) throw new Error("Accepted fact predecessors must be an array");
+  for (const id of predecessors) validateObjectId(id, "fact.predecessors entry");
   const revoked = new Set(store.revocations().map((item) => item.fact_id));
   for (const id of predecessors) {
     if (!store.hasFact(id)) throw new Error(`Missing predecessor fact ${id}`);
@@ -56,11 +64,16 @@ export function submitVerification(store, input) {
   }
   const statement = input.statement ?? finding.sections.Statement ?? finding.sections.Claim;
   const proof = input.proof ?? finding.sections.Proof ?? finding.sections.Evidence;
-  if (!statement || !proof) throw new Error("Accepted fact requires a statement and proof/evidence body");
+  if (!normalizeWhitespace(statement) || !normalizeWhitespace(proof)) throw new Error("Accepted fact requires a statement and proof/evidence body");
   const problem_id = input.problem_id ?? finding.metadata.problem_id ?? "workspace";
   const glossary = input.glossary ?? finding.metadata.glossary ?? {};
+  if (!glossary || typeof glossary !== "object" || Array.isArray(glossary)) throw new Error("Accepted fact glossary must be an object");
+  const evidenceRefs = [...new Set([...(finding.metadata.evidence_refs ?? []), ...(record.evidence_refs ?? [])])];
+  for (const evidenceId of evidenceRefs) {
+    if (!store.readEvidence(evidenceId)) throw new Error(`Missing verification evidence ${evidenceId}`);
+  }
   const fact_id = computeFactId({ problem_id, predecessors, glossary, statement, proof });
-  const factRecord = {
+  const factRecord = validateFact({
     schema: SCHEMAS.fact,
     fact_id,
     problem_id,
@@ -80,15 +93,26 @@ export function submitVerification(store, input) {
     resolution: input.resolution ?? "proved",
     provenance: {
       finding_id: finding.metadata.id,
-      evidence_refs: [...new Set([...(finding.metadata.evidence_refs ?? []), ...(record.evidence_refs ?? [])])]
+      evidence_refs: evidenceRefs
     },
     external_refs: input.external_refs ?? finding.metadata.external_refs ?? [],
     created_at: record.at
-  };
-  store.writeFact(factRecord, { Statement: statement, Proof: proof, Intuition: input.intuition ?? finding.sections.Intuition ?? "" });
-  store.addEdge({ schema: SCHEMAS.edge, from: finding.metadata.id, type: "PRODUCED", to: fact_id, at: record.at });
-  for (const predecessor of predecessors) store.addEdge({ schema: SCHEMAS.edge, from: fact_id, type: "DEPENDS_ON", to: predecessor, at: record.at });
-  store.writeFinding({ ...finding.metadata, state: "supported", fact_id, updated_at: record.at }, finding.sections, { replace: true });
+  });
+  if (store.hasFact(fact_id)) throw new Error(`Fact ${fact_id} already exists`);
+  if (store.hasFinding(fact_id) || store.readEvidence(fact_id)) throw new Error(`Fact ${fact_id} conflicts with an existing object`);
+  const producedEdge = validateEdge({ schema: SCHEMAS.edge, from: finding.metadata.id, type: "PRODUCED", to: fact_id, at: record.at });
+  const predecessorEdges = predecessors.map((predecessor) => validateEdge({ schema: SCHEMAS.edge, from: fact_id, type: "DEPENDS_ON", to: predecessor, at: record.at }));
+  const updatedFinding = validateFinding({ ...finding.metadata, state: "supported", fact_id, updated_at: record.at });
+  const factSections = { Statement: statement, Proof: proof, Intuition: input.intuition ?? finding.sections.Intuition ?? "" };
+  serializeDocument(factRecord, factSections);
+  serializeDocument(updatedFinding, finding.sections);
+  store.edges();
+
+  store.verification(record);
+  store.writeFact(factRecord, factSections);
+  store.addEdge(producedEdge);
+  for (const edge of predecessorEdges) store.addEdge(edge);
+  store.writeFinding(updatedFinding, finding.sections, { replace: true });
   return { verification: record, fact: factRecord, promoted: true };
 }
 
@@ -98,6 +122,7 @@ export function cascadeRevoke(store, factId, reason, authority) {
   const reverseDependencies = new Map();
   for (const edge of graph.edges) {
     if (edge.type !== "DEPENDS_ON") continue;
+    if (!store.hasFact(edge.from)) continue;
     if (!reverseDependencies.has(edge.to)) reverseDependencies.set(edge.to, []);
     reverseDependencies.get(edge.to).push(edge.from);
   }

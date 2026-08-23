@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import { createRequire } from "node:module";
 import { Store } from "./store.js";
 import { workspaceStatus, graphLog } from "./status.js";
 import { orient } from "./orient.js";
@@ -8,6 +9,9 @@ import { applyProposal } from "./record.js";
 import { submitVerification, cascadeRevoke } from "./facts.js";
 import { semanticDiff } from "./diff.js";
 import { doctor } from "./doctor.js";
+
+const require = createRequire(import.meta.url);
+const { version: VERSION } = require("../../package.json");
 
 const ROLE_TOOLS = {
   agent: ["rsh_status", "rsh_orient", "rsh_check", "rsh_get", "rsh_relations", "rsh_propose_finding", "rsh_log"],
@@ -73,7 +77,7 @@ export async function runMcp({ role = process.env.RSH_ROLE ?? "agent", root } = 
     try {
       let result;
       if (request.method === "initialize") {
-        result = { protocolVersion: request.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "rsh", version: "0.1.0" } };
+        result = { protocolVersion: request.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "rsh", version: VERSION } };
       } else if (request.method === "notifications/initialized") {
         continue;
       } else if (request.method === "ping") {

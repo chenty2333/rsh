@@ -16,6 +16,28 @@ function isStringArray(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
+export function validateObjectId(id, label = "object id") {
+  assert(typeof id === "string" && id.length > 0, `${label} is required`);
+  assert(id.length <= 128, `${label} must be at most 128 characters`);
+  assert(!id.includes("/") && !id.includes("\\") && !id.includes(".."), `${label} contains an unsafe path sequence`);
+  assert(/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id), `${label} must start with a letter or number and contain only letters, numbers, dot, underscore, or hyphen`);
+  return id;
+}
+
+export function validateJsonSerializable(value, label = "record") {
+  try {
+    JSON.stringify(value);
+  } catch (error) {
+    throw new Error(`${label} must be JSON-serializable: ${error.message}`);
+  }
+  return value;
+}
+
+function validateObjectIdArray(value, label) {
+  assert(isStringArray(value), `${label} must be an array of strings`);
+  for (const id of value) validateObjectId(id, `${label} entry`);
+}
+
 export function validateRoute(route = {}, label = "route") {
   assert(route && typeof route === "object", `${label} must be an object`);
   for (const key of ["targets", "mechanisms", "assumptions", "exclusions", "implicit_claims"]) {
@@ -34,54 +56,63 @@ export function validateRoute(route = {}, label = "route") {
 export function validateFinding(record) {
   assert(record && typeof record === "object", "finding must be an object");
   assert(record.schema === SCHEMAS.finding, `finding.schema must be ${SCHEMAS.finding}`);
-  assert(typeof record.id === "string" && record.id.length > 0, "finding.id is required");
+  validateObjectId(record.id, "finding.id");
   assert(FINDING_KINDS.has(record.kind), `Unsupported finding kind: ${record.kind}`);
   assert(typeof record.title === "string" && record.title.length > 0, "finding.title is required");
   assert(FINDING_STATES.has(record.state), `Unsupported finding state: ${record.state}`);
   assert(record.trust === "finding", "finding.trust must be finding");
   if (record.route) validateRoute(record.route, "finding.route");
-  if (record.evidence_refs !== undefined) assert(isStringArray(record.evidence_refs), "finding.evidence_refs must be an array of strings");
+  if (record.predecessors !== undefined) validateObjectIdArray(record.predecessors, "finding.predecessors");
+  if (record.evidence_refs !== undefined) validateObjectIdArray(record.evidence_refs, "finding.evidence_refs");
+  validateJsonSerializable(record, "finding");
   return record;
 }
 
 export function validateFact(record) {
   assert(record && typeof record === "object", "fact must be an object");
   assert(record.schema === SCHEMAS.fact, `fact.schema must be ${SCHEMAS.fact}`);
-  assert(typeof record.fact_id === "string" && record.fact_id.length >= 12, "fact.fact_id is required");
+  validateObjectId(record.fact_id, "fact.fact_id");
+  assert(record.fact_id.length >= 12, "fact.fact_id is required");
   assert(FACT_KINDS.has(record.kind), `Unsupported fact kind: ${record.kind}`);
   assert(typeof record.title === "string" && record.title.length > 0, "fact.title is required");
-  assert(isStringArray(record.predecessors ?? []), "fact.predecessors must be an array of strings");
+  validateObjectIdArray(record.predecessors ?? [], "fact.predecessors");
   assert(record.verification && typeof record.verification === "object", "fact.verification is required");
   assert(VERIFICATION_METHODS.has(record.verification.method), `Unsupported verification method: ${record.verification.method}`);
   assert(EVIDENCE_GRADES.has(record.evidence_grade), `Unsupported evidence grade: ${record.evidence_grade}`);
+  validateJsonSerializable(record, "fact");
   return record;
 }
 
 export function validateEvidence(record) {
   assert(record && typeof record === "object", "evidence must be an object");
   assert(record.schema === SCHEMAS.evidence, `evidence.schema must be ${SCHEMAS.evidence}`);
-  assert(typeof record.id === "string" && record.id.length > 0, "evidence.id is required");
+  validateObjectId(record.id, "evidence.id");
   assert(typeof record.kind === "string" && record.kind.length > 0, "evidence.kind is required");
   assert(EVIDENCE_GRADES.has(record.grade), `Unsupported evidence grade: ${record.grade}`);
+  validateJsonSerializable(record, "evidence");
   return record;
 }
 
 export function validateEdge(record) {
   assert(record && typeof record === "object", "edge must be an object");
   assert(record.schema === SCHEMAS.edge, `edge.schema must be ${SCHEMAS.edge}`);
-  assert(typeof record.from === "string" && record.from.length > 0, "edge.from is required");
-  assert(typeof record.to === "string" && record.to.length > 0, "edge.to is required");
+  validateObjectId(record.from, "edge.from");
+  validateObjectId(record.to, "edge.to");
   assert(EDGE_TYPES.has(record.type), `Unsupported edge type: ${record.type}`);
+  validateJsonSerializable(record, "edge");
   return record;
 }
 
 export function validateVerification(record) {
   assert(record && typeof record === "object", "verification must be an object");
   assert(record.schema === SCHEMAS.verification, `verification.schema must be ${SCHEMAS.verification}`);
-  assert(typeof record.finding_id === "string", "verification.finding_id is required");
+  validateObjectId(record.verification_id, "verification.verification_id");
+  validateObjectId(record.finding_id, "verification.finding_id");
   assert(["accepted", "rejected", "inconclusive"].includes(record.verdict), "verification.verdict is invalid");
   assert(VERIFICATION_METHODS.has(record.method), `Unsupported verification method: ${record.method}`);
   assert(typeof record.authority === "string" && record.authority.length > 0, "verification.authority is required");
+  if (record.evidence_refs !== undefined) validateObjectIdArray(record.evidence_refs, "verification.evidence_refs");
+  validateJsonSerializable(record, "verification");
   return record;
 }
 

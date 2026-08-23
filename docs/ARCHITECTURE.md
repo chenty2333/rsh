@@ -61,6 +61,8 @@ Retrieval is graph-first:
 
 The derived index is not authoritative.
 
+Revoked truth facts remain in the historical graph for audit and cascade analysis, but active retrieval views exclude them. Findings that produced a revoked fact remain visible as exploration history and carry an explicit promoted-truth status.
+
 ## Role boundary
 
 MCP roles determine available tools in code, not by prompt convention.

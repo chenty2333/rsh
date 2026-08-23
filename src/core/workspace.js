@@ -65,7 +65,7 @@ export function initializeWorkspace(root, options = {}) {
 
   const ignoreMarker = "# rsh generated caches";
   appendUniqueBlock(path.join(root, ".gitignore"), ignoreMarker, ".rsh/cache/\n.rsh/tmp/\n.rsh/locks/");
-  installSkills(root);
+  installSkills(root, options);
   appendUniqueBlock(
     path.join(root, "AGENTS.md"),
     "<!-- rsh-agent-instructions -->",
@@ -93,11 +93,11 @@ export function initializeWorkspace(root, options = {}) {
   return { root, paths };
 }
 
-function installSkills(root) {
+function installSkills(root, options = {}) {
   const skill = `---\nname: rsh\ndescription: Use RSH as the persistent research-state repository and preflight analyzer.\n---\n\n# RSH workflow\n\n1. Before substantial research, run \`rsh orient <goal>\`.\n2. Compile a proposed route into typed IR and run \`rsh check --ir <file>\` before spending significant effort.\n3. If the route is BLOCKED, do not repeat it unchanged. Inspect the counterexample scope and recorded escape conditions.\n4. After a theorem, counterexample, barrier, meaningful dead end, or open gap is found, propose a finding with \`rsh record\` or the MCP tool.\n5. Findings are awareness, not truth. Only the configured verification workflow may create facts.\n6. Cite object IDs and evidence references in downstream work.\n7. Never infer that a failed child branch revokes preserved ancestor facts.\n`;
   for (const target of [path.join(root, ".agents", "skills", "rsh", "SKILL.md"), path.join(root, ".claude", "skills", "rsh", "SKILL.md")]) {
     ensureDir(path.dirname(target));
-    fs.writeFileSync(target, skill, "utf8");
+    if (!fs.existsSync(target) || options.force) fs.writeFileSync(target, skill, "utf8");
   }
 }
 

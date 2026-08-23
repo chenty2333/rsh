@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { initializeWorkspace } from "./core/workspace.js";
 import { requireWorkspace } from "./core/paths.js";
@@ -16,20 +17,160 @@ import { seedGabidulin } from "./core/seed.js";
 import { listImporters, runImporter } from "./importers/index.js";
 import { runMcp } from "./core/mcp.js";
 
-const VERSION = "0.1.0";
+const require = createRequire(import.meta.url);
+const { version: VERSION } = require("../package.json");
+
+const BOOLEAN_FLAGS = new Set([
+  "allow-missing-predecessors",
+  "force",
+  "graph",
+  "help",
+  "json",
+  "replace",
+  "strict",
+  "traces",
+  "version"
+]);
+
+const VALUE_FLAGS = new Set([
+  "authority",
+  "command",
+  "embedding-command",
+  "file",
+  "ir",
+  "limit",
+  "method",
+  "name",
+  "payload",
+  "reason",
+  "role",
+  "verdict"
+]);
+
+const COMMANDS = new Set([
+  "check",
+  "compile",
+  "diff",
+  "doctor",
+  "get",
+  "help",
+  "import",
+  "index",
+  "init",
+  "log",
+  "mcp",
+  "orient",
+  "record",
+  "relations",
+  "revoke",
+  "seed",
+  "status",
+  "verify",
+  "version"
+]);
+
+const GLOBAL_FLAGS = new Set(["help", "version"]);
+
+const COMMAND_FLAGS = {
+  check: new Set(["command", "file", "ir", "json", "strict"]),
+  compile: new Set(["command", "file", "json"]),
+  diff: new Set(["json"]),
+  doctor: new Set(["json"]),
+  get: new Set(["json"]),
+  help: new Set(),
+  import: new Set(["allow-missing-predecessors", "json", "limit", "traces"]),
+  index: new Set(["embedding-command"]),
+  init: new Set(["force", "name"]),
+  log: new Set(["graph"]),
+  mcp: new Set(["role"]),
+  orient: new Set(["json", "limit"]),
+  record: new Set(["file", "json", "replace"]),
+  relations: new Set(["json"]),
+  revoke: new Set(["authority", "json", "reason"]),
+  seed: new Set(["json"]),
+  status: new Set(["json"]),
+  verify: new Set(["authority", "force", "json", "method", "payload", "verdict"]),
+  version: new Set()
+};
+
+const POSITIONAL_LIMITS = {
+  diff: 2,
+  doctor: 0,
+  get: 1,
+  help: 0,
+  import: 2,
+  index: 0,
+  init: 0,
+  log: 0,
+  mcp: 0,
+  record: 1,
+  relations: 1,
+  revoke: 1,
+  seed: 1,
+  status: 0,
+  verify: 1,
+  version: 0
+};
 
 function parseArgs(argv) {
   const positional = [];
   const flags = {};
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i];
+    if (token === "--") {
+      positional.push(...argv.slice(i + 1));
+      break;
+    }
     if (!token.startsWith("--")) { positional.push(token); continue; }
-    const [name, inline] = token.slice(2).split("=", 2);
-    if (inline !== undefined) flags[name] = inline;
-    else if (i + 1 < argv.length && !argv[i + 1].startsWith("--")) flags[name] = argv[++i];
-    else flags[name] = true;
+    const option = token.slice(2);
+    const equals = option.indexOf("=");
+    const name = equals === -1 ? option : option.slice(0, equals);
+    const inline = equals === -1 ? undefined : option.slice(equals + 1);
+    if (BOOLEAN_FLAGS.has(name)) {
+      if (inline === undefined) flags[name] = true;
+      else if (inline === "true") flags[name] = true;
+      else if (inline === "false") flags[name] = false;
+      else throw new Error(`Boolean flag --${name} must be true or false`);
+      continue;
+    }
+    if (!VALUE_FLAGS.has(name)) throw new Error(`Unknown flag --${name}`);
+    if (inline !== undefined) {
+      if (!inline) throw new Error(`Flag --${name} requires a value`);
+      flags[name] = inline;
+      continue;
+    }
+    if (i + 1 >= argv.length || argv[i + 1].startsWith("--")) throw new Error(`Flag --${name} requires a value`);
+    flags[name] = argv[++i];
   }
   return { positional, flags };
+}
+
+function validateFlags(command, flags) {
+  const allowed = COMMAND_FLAGS[command] ?? new Set();
+  for (const name of Object.keys(flags)) {
+    if (!GLOBAL_FLAGS.has(name) && !allowed.has(name)) {
+      throw new Error(`Unknown flag --${name} for command ${command}`);
+    }
+  }
+}
+
+function validatePositionals(command, positional, flags) {
+  const limit = POSITIONAL_LIMITS[command];
+  if (limit !== undefined && positional.length > limit) {
+    throw new Error(`Command ${command} accepts at most ${limit} positional argument${limit === 1 ? "" : "s"}`);
+  }
+  if (command === "record" && flags.file && positional.length) {
+    throw new Error("Command record accepts either --file or a positional file, not both");
+  }
+  if (["check", "compile"].includes(command) && (flags.file || flags.ir) && positional.length) {
+    throw new Error(`Command ${command} does not accept plan text together with --${flags.ir ? "ir" : "file"}`);
+  }
+  if (command === "check" && flags.ir && (flags.file || flags.command)) {
+    throw new Error("Command check does not accept --ir together with --file or --command");
+  }
+  if (command === "import" && positional[0] === "list" && positional.length > 1) {
+    throw new Error("Command import list does not accept additional positional arguments");
+  }
 }
 
 function jsonOrPretty(value, flags, formatter = null) {
@@ -56,10 +197,20 @@ function formatStatus(status) {
 
 function formatOrient(packet) {
   const lines = [`Research orientation for: ${packet.query || "<workspace>"}`];
-  for (const hit of packet.primary) lines.push(`  ${hit.id} [${hit.layer}/${hit.kind}] ${hit.title}  score=${hit.score.toFixed(3)}`);
+  for (const hit of packet.primary) {
+    const trust = hit.layer === "truth"
+      ? hit.truth_status
+      : hit.promoted_truth_status ? `promoted truth ${hit.promoted_truth_status}` : null;
+    lines.push(`  ${hit.id} [${hit.layer}/${hit.kind}] ${hit.title}  score=${hit.score.toFixed(3)}${trust ? `  ${trust}` : ""}`);
+  }
   if (packet.graph_context.length) {
     lines.push("Graph context:");
-    for (const item of packet.graph_context) lines.push(`  ${item.id} [${item.layer}/${item.kind}] ${item.title}`);
+    for (const item of packet.graph_context) {
+      const trust = item.layer === "truth"
+        ? item.node?.truth_status
+        : item.promoted_truth_status ? `promoted truth ${item.promoted_truth_status}` : null;
+      lines.push(`  ${item.id} [${item.layer}/${item.kind}] ${item.title}${trust ? `  ${trust}` : ""}`);
+    }
   }
   if (packet.edges.length) {
     lines.push("Relevant relations:");
@@ -86,14 +237,23 @@ function formatAnalysis(result) {
 }
 
 function help() {
-  return `RSH ${VERSION} — private-first Research Git\n\nUsage:\n  rsh init [--name NAME]\n  rsh status [--json]\n  rsh orient [QUERY] [--json]\n  rsh compile <PLAN|--file FILE> [--json]\n  rsh check <PLAN> [--ir FILE] [--json]\n  rsh record --file PROPOSAL.json [--replace]\n  rsh verify FINDING --verdict accepted|rejected|inconclusive --method METHOD --authority NAME [--payload FILE]\n  rsh revoke FACT --reason TEXT [--authority NAME]\n  rsh get ID [--json]\n  rsh relations [ID] [--json]\n  rsh log [--graph]\n  rsh diff [FROM] [TO] [--json]\n  rsh index [--embedding-command CMD]\n  rsh import list\n  rsh import ADAPTER SOURCE [--traces]\n  rsh seed gabidulin\n  rsh doctor [--json]\n  rsh mcp [--role agent|verifier|operator]\n\nCore workflow:\n  orient → check → research → record → verify\n`;
+  return `RSH ${VERSION} — private-first Research Git\n\nUsage:\n  rsh init [--name NAME] [--force]\n  rsh status [--json]\n  rsh orient [QUERY] [--json]\n  rsh compile <PLAN|--file FILE> [--json]\n  rsh check <PLAN> [--ir FILE] [--strict] [--json]\n  rsh record --file PROPOSAL.json [--replace]\n  rsh verify FINDING --verdict accepted|rejected|inconclusive --method METHOD --authority NAME [--payload FILE]\n  rsh revoke FACT --reason TEXT [--authority NAME]\n  rsh get ID [--json]\n  rsh relations [ID] [--json]\n  rsh log [--graph]\n  rsh diff [FROM] [TO] [--json]\n  rsh index [--embedding-command CMD]\n  rsh import list\n  rsh import ADAPTER SOURCE [--traces]\n  rsh seed gabidulin\n  rsh doctor [--json]\n  rsh mcp [--role agent|verifier|operator]\n\nCore workflow:\n  orient → check → research → record → verify\n`;
 }
 
 export async function main(argv) {
   const { positional, flags } = parseArgs(argv);
   const command = positional.shift();
-  if (!command || flags.help || command === "help") { console.log(help()); return; }
-  if (flags.version || command === "--version" || command === "version") { console.log(VERSION); return; }
+  if (!command) {
+    validateFlags(null, flags);
+    if (flags.version) { console.log(VERSION); return; }
+    console.log(help());
+    return;
+  }
+  if (!COMMANDS.has(command)) throw new Error(`Unknown command ${command}. Run \`rsh help\`.`);
+  validateFlags(command, flags);
+  validatePositionals(command, positional, flags);
+  if (flags.version || command === "version") { console.log(VERSION); return; }
+  if (flags.help || command === "help") { console.log(help()); return; }
 
   if (command === "init") {
     const result = initializeWorkspace(process.cwd(), { name: flags.name, force: Boolean(flags.force) });
@@ -210,5 +370,4 @@ export async function main(argv) {
     await runMcp({ role: flags.role ?? process.env.RSH_ROLE ?? "agent", root });
     return;
   }
-  throw new Error(`Unknown command ${command}. Run \`rsh help\`.`);
 }

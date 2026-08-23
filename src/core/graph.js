@@ -1,12 +1,44 @@
-export function buildGraph(store) {
+export function buildGraph(store, options = {}) {
+  const includeRevoked = options.includeRevoked ?? true;
   const findings = store.listFindings();
-  const facts = store.listFacts({ includeRevoked: true });
+  const allFacts = store.listFacts({ includeRevoked: true });
+  const facts = includeRevoked ? allFacts : allFacts.filter((doc) => doc.truth_status === "active");
+  const factStatuses = new Map(allFacts.map((doc) => [doc.metadata.fact_id, doc.truth_status]));
   const evidence = store.listEvidence();
+  const rawEdges = store.edges();
+  const producedFacts = new Map();
+  for (const edge of rawEdges) {
+    if (edge.type !== "PRODUCED") continue;
+    if (!producedFacts.has(edge.from)) producedFacts.set(edge.from, new Set());
+    producedFacts.get(edge.from).add(edge.to);
+  }
   const nodes = new Map();
-  for (const doc of findings) nodes.set(doc.metadata.id, { layer: "exploration", ...doc.metadata, sections: doc.sections });
-  for (const doc of facts) nodes.set(doc.metadata.fact_id, { layer: "truth", ...doc.metadata, sections: doc.sections });
+  for (const doc of findings) {
+    const promotedFactIds = producedFacts.get(doc.metadata.id) ?? new Set();
+    if (doc.metadata.fact_id) promotedFactIds.add(doc.metadata.fact_id);
+    const promotedStatuses = new Set([...promotedFactIds].map((id) => factStatuses.get(id)).filter(Boolean));
+    const promotedTruthStatus = promotedStatuses.size > 1 ? "mixed" : [...promotedStatuses][0] ?? null;
+    nodes.set(doc.metadata.id, {
+      layer: "exploration",
+      ...doc.metadata,
+      sections: doc.sections,
+      promoted_fact_ids: [...promotedFactIds],
+      promoted_truth_status: promotedTruthStatus
+    });
+  }
+  for (const doc of facts) {
+    nodes.set(doc.metadata.fact_id, {
+      layer: "truth",
+      ...doc.metadata,
+      sections: doc.sections,
+      truth_status: doc.truth_status,
+      revocation: doc.revocation
+    });
+  }
   for (const record of evidence) nodes.set(record.id, { layer: "evidence", ...record });
-  const edges = store.edges();
+  const edges = includeRevoked
+    ? rawEdges
+    : rawEdges.filter((edge) => nodes.has(edge.from) && nodes.has(edge.to));
   const out = new Map();
   const incoming = new Map();
   for (const edge of edges) {

@@ -1,4 +1,6 @@
 name: ci
+permissions:
+  contents: read
 on:
   push:
     branches: [main, "rsh/**"]
@@ -7,15 +9,22 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-      - run: npm test
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
       - run: npm run check
-      - run: npm pack --dry-run
+      - if: matrix.node-version == 22
+        run: npm pack --dry-run
       - name: Black-box install and workspace lifecycle
+        if: matrix.node-version == 22
         run: |
           PKG=$(npm pack --silent)
           TMP=$(mktemp -d)

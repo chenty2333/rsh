@@ -45,7 +45,7 @@ rsh check --ir .rsh/examples/blocked-route.json
 rsh log --graph
 ```
 
-`rsh init` initializes Git when necessary and creates:
+`rsh init` initializes Git when necessary, locates the repository's Git root, and creates the workspace there:
 
 ```text
 .rsh/
@@ -61,7 +61,7 @@ rsh log --graph
 └── cache/           # derived and gitignored
 ```
 
-It also installs project-local Codex and Claude Code skills and an MCP configuration.
+It also updates `.gitignore`, `AGENTS.md`, and `CLAUDE.md`, installs project-local Codex and Claude Code skills under `.agents/skills/rsh/` and `.claude/skills/rsh/`, and writes `.mcp.json`. Existing skill files are preserved during a normal repeated init. Use `--force` deliberately: it rebuilds the workspace identity and configuration and overwrites the generated skill and MCP integration files.
 
 ## Core commands
 

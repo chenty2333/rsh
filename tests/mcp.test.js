@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import readline from "node:readline";
+import { createRequire } from "node:module";
 import { tempWorkspace, cli } from "./helpers.js";
+
+const require = createRequire(import.meta.url);
+const { version: packageVersion } = require("../package.json");
 
 function rpc(root, role, requests) {
   return new Promise((resolve, reject) => {
@@ -28,6 +32,7 @@ test("MCP roles expose different write surfaces", async () => {
   ];
   const agent = await rpc(root, "agent", base);
   const verifier = await rpc(root, "verifier", base);
+  assert.equal(agent.find((item) => item.id === 1).result.serverInfo.version, packageVersion);
   const agentTools = agent.find((item) => item.id === 2).result.tools.map((tool) => tool.name);
   const verifierTools = verifier.find((item) => item.id === 2).result.tools.map((tool) => tool.name);
   assert.ok(agentTools.includes("rsh_propose_finding"));
