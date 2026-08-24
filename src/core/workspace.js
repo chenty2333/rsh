@@ -1,114 +1,127 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
-import { SCHEMAS } from "./constants.js";
-import { ensureDir, safeRead, writeJsonAtomic } from "./fs.js";
-import { findGitRoot, workspacePaths } from "./paths.js";
-import { shortHash } from "./canonical.js";
-import { withWorkspaceWriteLock } from "./write-lock.js";
+import { commitFileBatch, ensureDir } from "./fs.js";
+import { workspacePaths } from "./paths.js";
 
-function git(args, cwd, options = {}) {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    stdio: options.stdio ?? ["ignore", "pipe", "pipe"]
-  }).trim();
+const RESEARCH_TEMPLATE = `# Research
+
+## Context
+
+Describe the current research problem here.
+
+## Open
+`;
+
+const LOCKS_IGNORE = `*
+!.gitignore
+`;
+
+const SKILLS = {
+  "rsh-resume": {
+    description: "Resume work from the durable state in an RSH workspace.",
+    body: `# Resume RSH research
+
+1. Run \`rsh resume\` at the start of a research turn.
+2. Use \`rsh find\` and \`rsh get\` only when relevant records need expansion.
+3. Continue from the open frontier in \`RESEARCH.md\`; \`rsh:about\` relations group records with frontier items.
+`
+  },
+  "rsh-checkpoint": {
+    description: "Checkpoint meaningful research progress in an RSH workspace.",
+    body: `# Checkpoint RSH research
+
+1. Create a checkpoint only for a reusable result, an excluded path, a new question, or a frontier change.
+2. Store one main conclusion per result record. Its Markdown should normally cover Conclusion, Argument/Evidence, Scope (including assumptions, limits, and exceptions), and optionally Reuse.
+3. Put structured links in \`[[relations]]\` entries such as \`type = "rsh:about"\` and \`target = "Q-abc"\`; cite record IDs in the body where they are actually used. A frontier \`open\` action automatically adds \`rsh:about\` from this Record to each generated Q/D item.
+4. When a result's main conclusion is itself a relation, it may include one projection: \`[assertion]\`, with \`subject = "R-b2c"\`, \`predicate = "math:generalizes"\`, and \`object = "R-c3d"\`. The body remains authoritative.
+5. Dead ends should preserve the attempted goal, failure mechanism, evidence, scope, and \`retry_if\`; experiences should preserve the observation, applicable context, reusable method, and misuse boundary.
+6. Every record needs a non-empty Markdown body. With MCP, call \`rsh_checkpoint\` using structured \`kind\` and \`body\` fields plus optional \`relations\`, \`assertion\`, and \`frontier\`; with the CLI, run \`rsh checkpoint FILE.md\`.
+7. Do not save ordinary step-by-step reasoning.
+`
+  }
+};
+
+function skillDocument(name, definition) {
+  return `---\nname: ${name}\ndescription: ${definition.description}\n---\n\n${definition.body}`;
 }
 
-export function ensureGitRepository(root) {
-  const gitRoot = findGitRoot(root);
-  if (gitRoot) return gitRoot;
-  git(["init"], root);
-  return root;
+export function checkRipgrep() {
+  try {
+    execFileSync("rg", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    throw new Error("RSH requires ripgrep (`rg`). Install ripgrep and ensure `rg` is available on PATH, then run `rsh init` again.");
+  }
 }
 
-function appendUniqueBlock(file, marker, content) {
-  const existing = safeRead(file, "");
-  if (existing.includes(marker)) return false;
-  const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
-  fs.appendFileSync(file, `${prefix}\n${marker}\n${content.trim()}\n`, "utf8");
-  return true;
+function assertEmptyWorkspace(paths) {
+  if (fs.lstatSync(paths.research, { throwIfNoEntry: false })) {
+    throw new Error(`RESEARCH.md already exists at ${paths.root}; refusing to overwrite existing research state.`);
+  }
+  const rsh = fs.lstatSync(paths.rsh, { throwIfNoEntry: false });
+  if (!rsh) return;
+  if (rsh.isSymbolicLink() || !rsh.isDirectory() || fs.readdirSync(paths.rsh).length > 0) {
+    throw new Error(`Cannot initialize RSH: ${paths.rsh} already exists and is not an empty directory.`);
+  }
 }
 
-export function initializeWorkspace(root, options = {}) {
+export function generatedSkillFiles(root) {
+  const files = [];
+  for (const parent of [".agents", ".claude"]) {
+    for (const [name, definition] of Object.entries(SKILLS)) {
+      files.push({ target: path.join(root, parent, "skills", name, "SKILL.md"), contents: skillDocument(name, definition) });
+    }
+  }
+  return files;
+}
+
+function assertSafeSkillTargets(files, root) {
+  for (const { target, contents } of files) {
+    let current = path.dirname(target);
+    while (current !== root) {
+      const stat = fs.lstatSync(current, { throwIfNoEntry: false });
+      if (stat && (stat.isSymbolicLink() || !stat.isDirectory())) throw new Error(`Cannot initialize RSH through unsafe skill path ${current}`);
+      current = path.dirname(current);
+    }
+    const stat = fs.lstatSync(target, { throwIfNoEntry: false });
+    if (stat && (stat.isSymbolicLink() || !stat.isFile())) throw new Error(`Cannot initialize RSH through unsafe skill file ${target}`);
+    if (stat && fs.readFileSync(target, "utf8") !== contents) throw new Error(`Cannot initialize RSH: ${target} already exists with incompatible content; refusing to overwrite it.`);
+  }
+}
+
+function ensureTrackedDirectory(directory, root, created) {
+  if (directory === root) return;
+  ensureTrackedDirectory(path.dirname(directory), root, created);
+  if (!fs.existsSync(directory)) {
+    fs.mkdirSync(directory);
+    created.push(directory);
+  }
+}
+
+export function initializeWorkspace(root) {
+  checkRipgrep();
   root = path.resolve(root);
-  ensureDir(root);
-  const gitRoot = ensureGitRepository(root);
-  if (path.resolve(gitRoot) !== root && !options.allowNested) root = gitRoot;
   const paths = workspacePaths(root);
-  for (const dir of [paths.rsh, paths.findings, paths.facts, paths.graph, paths.evidence, paths.traces, paths.cache, paths.examples, path.join(paths.rsh, "locks")]) ensureDir(dir);
-
-  return withWorkspaceWriteLock(root, () => initializeWorkspaceUnlocked(root, paths, options));
-}
-
-function initializeWorkspaceUnlocked(root, paths, options) {
-  if (!fs.existsSync(paths.workspace) || options.force) {
-    const name = options.name ?? path.basename(root);
-    writeJsonAtomic(paths.workspace, {
-      schema: SCHEMAS.workspace,
-      workspace_id: `ws-${shortHash(`${root}:${Date.now()}`, 12)}`,
-      name,
-      created_at: new Date().toISOString(),
-      format_version: 1,
-      truth_policy: {
-        accepted_methods: ["human_review", "reproduced", "formal", "imported_verified"],
-        allow_llm_audit_as_truth: false
-      },
-      compiler: {
-        mode: "agent_ir",
-        command: null,
-        heuristic_fallback: false
-      },
-      retrieval: {
-        graph_hops: 1,
-        max_results: 20,
-        embedding_command: null
-      }
-    });
+  assertEmptyWorkspace(paths);
+  ensureDir(root);
+  const skills = generatedSkillFiles(root);
+  assertSafeSkillTargets(skills, root);
+  const created = [];
+  try {
+    ensureTrackedDirectory(paths.records, root, created);
+    ensureTrackedDirectory(paths.locks, root, created);
+    for (const skill of skills) ensureTrackedDirectory(path.dirname(skill.target), root, created);
+    commitFileBatch([
+      { target: paths.research, contents: RESEARCH_TEMPLATE },
+      { target: path.join(paths.locks, ".gitignore"), contents: LOCKS_IGNORE },
+      ...skills.filter(({ target }) => !fs.existsSync(target))
+    ]);
+  } catch (error) {
+    for (const directory of [...created].reverse()) {
+      try { if (fs.readdirSync(directory).length === 0) fs.rmdirSync(directory); } catch {}
+    }
+    throw error;
   }
-
-  const ignoreMarker = "# rsh generated caches";
-  appendUniqueBlock(path.join(root, ".gitignore"), ignoreMarker, ".rsh/cache/\n.rsh/tmp/\n.rsh/locks/");
-  installSkills(root, options);
-  appendUniqueBlock(
-    path.join(root, "AGENTS.md"),
-    "<!-- rsh-agent-instructions -->",
-    "Before substantial research, read `.agents/skills/rsh/SKILL.md` and run `rsh orient` / typed-IR `rsh check`. Treat `.rsh/findings` as awareness and `.rsh/facts` as the workspace truth graph."
-  );
-  appendUniqueBlock(
-    path.join(root, "CLAUDE.md"),
-    "<!-- rsh-claude-instructions -->",
-    "Use `.claude/skills/rsh/SKILL.md`. Preflight serious research routes with typed RSH IR and propose findings after meaningful state changes. Never silently promote a finding to a fact."
-  );
-  const mcpFile = path.join(root, ".mcp.json");
-  if (!fs.existsSync(mcpFile) || options.force) {
-    writeJsonAtomic(mcpFile, {
-      mcpServers: {
-        rsh: {
-          command: "rsh",
-          args: ["mcp", "--role", "agent"],
-          cwd: "."
-        }
-      }
-    });
-  }
-  if (!fs.existsSync(paths.edges)) fs.writeFileSync(paths.edges, "", "utf8");
-  for (const file of [paths.events, paths.verifications, paths.revocations]) if (!fs.existsSync(file)) fs.writeFileSync(file, "", "utf8");
   return { root, paths };
-}
-
-function installSkills(root, options = {}) {
-  const skill = `---\nname: rsh\ndescription: Use RSH as the persistent research-state repository and preflight analyzer.\n---\n\n# RSH workflow\n\n1. Before substantial research, run \`rsh orient <goal>\`.\n2. Compile a proposed route into \`rsh.route.v1\` IR and run \`rsh check --ir <file>\` (or \`--command <compiler>\`) before spending significant effort. Do not send natural language to formal \`rsh check\`; \`--heuristic\` is an explicit experimental, low-confidence demo only.\n3. If the route is BLOCKED, do not repeat it unchanged. Inspect the counterexample scope and recorded escape conditions.\n4. After a theorem, counterexample, barrier, meaningful dead end, or open gap is found, propose a finding with \`rsh record\` or the MCP tool. RSH serializes product write operations with a workspace-local lock; do not build cross-file transaction assumptions on the internal Store API.\n5. Findings are awareness, not truth. Only the configured verification workflow may create facts.\n6. Cite object IDs and evidence references in downstream work.\n7. Never infer that a failed child branch revokes preserved ancestor facts.\n`;
-  for (const target of [path.join(root, ".agents", "skills", "rsh", "SKILL.md"), path.join(root, ".claude", "skills", "rsh", "SKILL.md")]) {
-    ensureDir(path.dirname(target));
-    if (!fs.existsSync(target) || options.force) fs.writeFileSync(target, skill, "utf8");
-  }
-}
-
-export function environmentIdentity() {
-  return {
-    user: process.env.USER ?? process.env.USERNAME ?? os.userInfo().username,
-    hostname: os.hostname()
-  };
 }

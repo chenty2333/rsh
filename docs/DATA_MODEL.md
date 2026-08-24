@@ -1,97 +1,83 @@
-# RSH data model
+# Data model
 
-## Finding document
+## IDs and frontier
 
-Stored as `.rsh/findings/<id>.md` with JSON frontmatter and Markdown sections.
+Question, direction, and Record IDs use `Q-`, `D-`, and `R-` followed by
+exactly three lowercase base36 characters (`[0-9a-z]{3}`). Generators avoid IDs
+used by current or historical workspace objects.
 
-Required metadata:
+`RESEARCH.md` contains exactly one `## Open` section. Managed entries use two
+spaces per tree level:
 
-```json
-{
-  "schema": "rsh.finding.v1",
-  "id": "A174",
-  "kind": "attempt",
-  "title": "Uniform slice regularity",
-  "state": "refuted",
-  "trust": "finding",
-  "verifiable": false
-}
+```markdown
+- [Q-a13] An open question
+  - [D-4z1] A possible direction
 ```
 
-Optional route fields:
+Only open entries occur there. Closing a parent requires every open child to be
+closed or moved in the same checkpoint. Children do not close their parent.
 
-```json
-{
-  "route": {
-    "targets": [],
-    "mechanisms": [],
-    "assumptions": [],
-    "exclusions": [],
-    "implicit_claims": [],
-    "quantifiers": {
-      "scope": "universal",
-      "witness": "existential"
-    },
-    "parameters": {}
-  }
-}
+## Records
+
+A Record is a complete document: TOML frontmatter delimited by `+++`, followed
+by non-empty Markdown. Kinds are `result`, `dead_end`, and `experience`; states
+are `unchecked`, `checked`, and `withdrawn`. State is a local workflow marker,
+not mathematical truth, and never propagates through relations.
+
+A `result` contains one main conclusion, its complete argument or evidence, and
+the applicable scope, assumptions, limitations, and exceptions. Reusable
+intermediate conclusions become separate Records; ordinary supporting steps
+remain in the body. `Conclusion`, `Argument`, `Scope`, and optional `Reuse`
+headings are recommended but not required. Cite another Record where it is used.
+
+A `dead_end` preserves the attempted goal, failure mechanism, supporting
+evidence, applicability scope, and `retry_if` conditions. An `experience`
+preserves the observation, applicable context, reusable method, and misuse
+boundary. Records do not store ordinary step-by-step thought, reverse links,
+derived confidence, dependency-state copies, or search caches.
+
+## Relations
+
+Each outbound relation is an array-of-tables entry:
+
+```toml
+[[relations]]
+type = "rsh:depends_on"
+target = "R-a9z"
 ```
 
-A failure is not a Boolean. It may record:
+Relation types match a lowercase namespace form such as
+`namespace:predicate_name`. Entries have only `type` and `target`; explanations
+belong in Markdown. Duplicate relations are invalid.
 
-- the claim killed;
-- counterexample or barrier reference;
-- applicable scope;
-- bad traits;
-- preserved results;
-- minimum escape conditions;
-- newly revealed gap.
+- `rsh:about` targets an existing or historical `Q-`/`D-` and associates the
+  Record with a frontier item for resume. Opening a new Q/D in a checkpoint
+  automatically stores this relation on the originating Record.
+- `rsh:depends_on` targets an existing `R-` and creates reminders only.
+- `rsh:derived_from` targets an existing `R-` and records provenance.
+- Custom namespaces such as `math:*`, `alice:*`, and `lean:*` are preserved and
+  searchable but have no automatic inference, withdrawal, or scheduling effect.
 
-## Fact document
+Backlinks are derived at read time; they are never stored.
 
-Stored as `.rsh/facts/<fact-id>.md`.
+## Relational assertions
 
-```json
-{
-  "schema": "rsh.fact.v1",
-  "fact_id": "content-addressed-id",
-  "problem_id": "...",
-  "kind": "lemma",
-  "predecessors": [],
-  "verification": {
-    "state": "accepted",
-    "method": "human_review",
-    "authority": "...",
-    "verification_id": "..."
-  },
-  "evidence_grade": "independently_reviewed",
-  "resolution": "proved"
-}
+When a result's main conclusion is a relation, it may include one projection:
+
+```toml
+[assertion]
+subject = "R-b2c"
+predicate = "math:generalizes"
+object = "R-c3d"
 ```
 
-Verification state, evidence grade, and mathematical resolution are intentionally separate.
-`llm_audited` is the evidence grade for an LLM verifier judgment; it must not be represented as `independently_reviewed` or `formal`.
+Subject and object resolve to a current or historical local `Q-`, `D-`, or `R-`;
+the predicate follows the same namespace format. An assertion supplements, and
+never replaces, the conclusion and argument. Ordinary results omit it. Readers
+derive mathematical inverse relations instead of storing both directions.
 
-## Evidence record
+## Frontier actions
 
-Stored as `.rsh/evidence/<id>.json`.
-
-Evidence may reference a conversation span, Git commit and line range, notebook cell, executable artifact, PDF page, formal theorem, or external research object. It includes a content hash where available.
-
-## Edge record
-
-Append-only JSONL in `.rsh/graph/edges.jsonl`.
-
-```json
-{"schema":"rsh.edge.v1","from":"C175","type":"REFUTES","to":"A174","at":"..."}
-```
-
-## Events and receipts
-
-- `.rsh/events.jsonl`: workspace state transitions;
-- `.rsh/verifications.jsonl`: verifier receipts, including rejected or inconclusive checks;
-- `.rsh/revocations.jsonl`: append-only cascade-revocation records.
-
-## Cache
-
-`.rsh/cache/` is gitignored and reconstructible. It may contain lexical indexes, graph indexes, source offsets, and embeddings.
+Frontier actions are `open`, `close`, `revise`, and `reopen`. Stored actions
+contain the generated ID and the before/after snapshot needed to inspect or
+reopen state without parsing Git history.

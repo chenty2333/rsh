@@ -1,101 +1,185 @@
-import readline from "node:readline";
+import path from "node:path";
 import { createRequire } from "node:module";
-import { Store } from "./store.js";
-import { workspaceStatus, graphLog } from "./status.js";
-import { orient } from "./orient.js";
-import { analyzeRoute } from "./analyzer.js";
-import { validateRouteIR } from "./schema.js";
-import { applyProposal } from "./record.js";
-import { submitVerification, cascadeRevoke } from "./facts.js";
-import { semanticDiff } from "./diff.js";
-import { doctor } from "./doctor.js";
-import { withWorkspaceWriteLock } from "./write-lock.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
+import { findRecords, formatFindMarkdown, formatStatusMarkdown, getItem, resumeResearch, statusWorkspace } from "./query.js";
+import { checkpoint, markRecord, serializeCheckpointDocument } from "./record.js";
+import { doctor, formatDoctorMarkdown } from "./doctor.js";
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require("../../package.json");
+const ID = z.string().regex(/^[QDR]-[0-9a-z]{3}$/,
+  "id must be Q-, D-, or R- followed by exactly 3 lowercase base36 characters");
+const RECORD_ID = z.string().regex(/^R-[0-9a-z]{3}$/,
+  "record id must be R- followed by exactly 3 lowercase base36 characters");
+const FRONTIER_ID = z.string().regex(/^[QD]-[0-9a-z]{3}$/,
+  "frontier id must be Q- or D- followed by exactly 3 lowercase base36 characters");
+const PREDICATE = z.string().regex(/^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$/,
+  "relation type must use lowercase namespace:predicate_name format");
+function nonEmptyString(description) {
+  return z.string().min(1, "value must be non-empty")
+    .refine((value) => Boolean(value.trim()), "value must be non-empty")
+    .describe(description);
+}
+const BODY = nonEmptyString("Complete non-empty Markdown body; authoritative conclusion, evidence, and scope.");
+const RETRY_CONDITION = nonEmptyString("One non-empty condition under which the Record should be retried.");
+const FRONTIER_TEXT = z.string().min(1, "frontier text must be non-empty")
+  .refine((value) => Boolean(value.trim()), "frontier text must be non-empty")
+  .refine((value) => !/[\r\n]/.test(value), "frontier text must stay on one line")
+  .describe("Non-empty single-line question or direction text.");
+const PARENT_ID = z.union([FRONTIER_ID, z.literal("")]);
+const RELATION = z.object({
+  type: PREDICATE.describe("Lowercase namespace:predicate_name relation type."),
+  target: ID.describe("Existing local Q-, D-, or R- target ID.")
+}).strict();
+const ASSERTION = z.object({
+  subject: ID.describe("Existing local Q-, D-, or R- subject ID."),
+  predicate: PREDICATE.describe("Lowercase namespace:predicate_name projected predicate."),
+  object: ID.describe("Existing local Q-, D-, or R- object ID.")
+}).strict();
+const FRONTIER_ACTION = z.union([
+  z.object({ action: z.literal("open"), kind: z.enum(["question", "direction"]), text: FRONTIER_TEXT, parent: PARENT_ID.optional() }).strict(),
+  z.object({ action: z.literal("close"), id: FRONTIER_ID, outcome: z.enum(["resolved", "exhausted", "abandoned", "superseded"]) }).strict(),
+  z.object({ action: z.literal("revise"), id: FRONTIER_ID, text: FRONTIER_TEXT.optional(), parent: PARENT_ID.optional() }).strict()
+    .refine((value) => value.text !== undefined || value.parent !== undefined, "revise requires text or parent")
+    .describe("Revise an open frontier item; provide at least text or parent."),
+  z.object({ action: z.literal("reopen"), id: FRONTIER_ID, parent: PARENT_ID.optional() }).strict()
+]);
+const CHECKPOINT_INPUT = z.object({
+  kind: z.enum(["result", "dead_end", "experience"]).describe("Record kind."),
+  body: BODY,
+  state: z.enum(["unchecked", "checked", "withdrawn"]).optional().describe("Local workflow state; defaults to unchecked."),
+  scope: z.string().optional().describe("Applicability scope; required and non-empty for dead_end Records."),
+  retry_if: z.array(RETRY_CONDITION).optional().describe("Conditions under which a dead end should be retried."),
+  relations: z.array(RELATION).optional().describe("Outbound structured relations; defaults to an empty list."),
+  assertion: ASSERTION.optional().describe("Optional machine-readable projection, allowed only for result Records."),
+  frontier: z.array(FRONTIER_ACTION).optional().describe("Atomic frontier open, close, revise, or reopen actions; defaults to an empty list.")
+}).strict();
 
-const ROLE_TOOLS = {
-  agent: ["rsh_status", "rsh_orient", "rsh_check", "rsh_get", "rsh_relations", "rsh_propose_finding", "rsh_log"],
-  verifier: ["rsh_status", "rsh_orient", "rsh_get", "rsh_relations", "rsh_submit_verdict", "rsh_log"],
-  operator: ["rsh_status", "rsh_orient", "rsh_check", "rsh_get", "rsh_relations", "rsh_propose_finding", "rsh_submit_verdict", "rsh_revoke", "rsh_diff", "rsh_log", "rsh_doctor"]
+const TOOLS = {
+  rsh_resume: { description: "Resume research from durable RSH state.", inputSchema: { all: z.boolean().optional() } },
+  rsh_find: { description: "Find research records matching a query and optional filters.", inputSchema: {
+    query: z.string(), regex: z.boolean().optional(), kind: z.enum(["result", "dead_end", "experience"]).optional(),
+    state: z.enum(["unchecked", "checked", "withdrawn"]).optional(), limit: z.number().int().positive().optional()
+  } },
+  rsh_get: { description: "Get one research item by ID.", inputSchema: { id: ID } },
+  rsh_checkpoint: { description: "Checkpoint one structured research Record. Kind and non-empty Markdown body are required; relations, assertion, and frontier changes are optional.", inputSchema: CHECKPOINT_INPUT },
+  rsh_mark: { description: "Set the state of an existing research record.", inputSchema: { record_id: RECORD_ID, state: z.enum(["unchecked", "checked", "withdrawn"]) } },
+  rsh_status: { description: "Show the current RSH workspace status.", inputSchema: {} },
+  rsh_doctor: { description: "Audit the RSH workspace and report actionable findings.", inputSchema: {} }
 };
 
-const TOOL_SCHEMAS = {
-  rsh_status: ["Read workspace status.", {}],
-  rsh_orient: ["Retrieve a graph-first research packet for a goal.", { query: { type: "string" }, limit: { type: "number" } }],
-  rsh_check: ["Run preflight static analysis on required typed rsh.route.v1 IR.", { ir: { type: "object" } }],
-  rsh_get: ["Read one research object by id.", { id: { type: "string" } }],
-  rsh_relations: ["List typed research relations, optionally touching one id.", { id: { type: "string" } }],
-  rsh_propose_finding: ["Write unverified findings/evidence/relations into the exploration graph.", { proposal: { type: "object" } }],
-  rsh_submit_verdict: ["Verifier-only write gate: accept, reject, or challenge one finding.", { verdict: { type: "object" } }],
-  rsh_revoke: ["Operator-only cascade revocation of a truth-graph fact.", { fact_id: { type: "string" }, reason: { type: "string" }, authority: { type: "string" } }],
-  rsh_diff: ["Explain semantic research-state changes across Git refs.", { from: { type: "string" }, to: { type: "string" } }],
-  rsh_log: ["Render the dual research graph as text.", {}],
-  rsh_doctor: ["Audit workspace schemas, graph integrity, skills, and indexes.", {}]
-};
-
-function toolsFor(role) {
-  return (ROLE_TOOLS[role] ?? ROLE_TOOLS.agent).map((name) => {
-    const [description, properties] = TOOL_SCHEMAS[name];
-    return { name, description, inputSchema: { type: "object", properties, required: name === "rsh_check" ? ["ir"] : [], additionalProperties: true } };
-  });
+function portable(value, root, key = "") {
+  if (Array.isArray(value)) return value.map((item) => portable(item, root));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value)
+    .filter(([name, item]) => !((name === "file" || name.endsWith("_path")) && typeof item === "string" && path.isAbsolute(item)))
+    .map(([name, item]) => [name, portable(item, root, name)]));
+  if (typeof value !== "string" || !path.isAbsolute(value)) return value;
+  const relative = path.relative(root, value);
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+    ? relative.split(path.sep).join("/") : key ? `[${key} omitted]` : "[absolute path omitted]";
 }
 
-function callTool(store, role, name, args = {}) {
-  if (!(ROLE_TOOLS[role] ?? []).includes(name)) throw new Error(`Role ${role} cannot call ${name}`);
+function display(value) {
+  if (value === null) return "null";
+  if (["string", "boolean", "number"].includes(typeof value)) return String(value);
+  return JSON.stringify(value);
+}
+
+function markdown(value, heading = "RSH result") {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return `# ${heading}\n\nNo result.`;
+  if (Array.isArray(value)) return `# ${heading}\n\n${value.length
+    ? value.map((item) => `- ${display(item)}`).join("\n") : "No records found."}`;
+  const lines = [`# ${heading}`, ""];
+  for (const [key, item] of Object.entries(value)) {
+    if (Array.isArray(item)) lines.push(`## ${key}`, "", item.length ? item.map((entry) => `- ${display(entry)}`).join("\n") : "None.", "");
+    else if (item && typeof item === "object") lines.push(`## ${key}`, "", ...Object.entries(item).map(([name, entry]) => `- **${name}:** ${display(entry)}`), "");
+    else lines.push(`- **${key}:** ${display(item)}`, "");
+  }
+  return lines.join("\n").trim();
+}
+
+function recordDocument(value) {
+  if (typeof value === "string") return value;
+  for (const key of ["document", "text", "content", "markdown"]) if (typeof value?.[key] === "string") return value[key];
+  return markdown(value, "Research record");
+}
+
+function resultId(value, fallback) {
+  return value?.id ?? value?.record_id ?? value?.record?.id ?? value?.metadata?.id ?? fallback ?? null;
+}
+
+function writeMarkdown(heading, id, state) {
+  return [`# ${heading}`, "", id ? `- **Record:** ${id}` : "- Record saved.", ...(state ? [`- **State:** ${state}`] : [])].join("\n");
+}
+
+function links(id) {
+  return id ? [{ type: "resource_link", uri: `rsh://record/${encodeURIComponent(id)}`, name: id,
+    description: `RSH research record ${id}`, mimeType: "text/markdown" }] : [];
+}
+
+function recordLinks(ids) {
+  return [...new Set(ids.filter((id) => /^R-[0-9a-z]{3}$/.test(id)))].flatMap((id) => links(id));
+}
+
+function response(text, result, extra = []) {
+  const structuredContent = result && typeof result === "object" && !Array.isArray(result) ? result : undefined;
+  return { content: [{ type: "text", text }, ...extra], ...(structuredContent ? { structuredContent } : {}), isError: false };
+}
+
+function safeError(error, root) {
+  let message = error instanceof Error ? error.message : String(error);
+  message = message.split(path.resolve(root)).join(".");
+  message = message.replace(/(^|[\s'"])(\/(?:[^\s'"]+\/?)+)/g, "$1[absolute path omitted]");
+  return message;
+}
+
+async function callTool(root, name, args) {
   switch (name) {
-    case "rsh_status": return workspaceStatus(store);
-    case "rsh_orient": return orient(store, args.query ?? "", { limit: args.limit });
-    case "rsh_check":
-      if (!Object.hasOwn(args, "ir")) throw new Error("rsh_check requires an ir object with schema rsh.route.v1; natural-language text is not accepted.");
-      return analyzeRoute(store, validateRouteIR(args.ir));
-    case "rsh_get": return store.get(args.id);
-    case "rsh_relations": return args.id ? store.edges().filter((edge) => edge.from === args.id || edge.to === args.id) : store.edges();
-    case "rsh_propose_finding": return withWorkspaceWriteLock(store.root, () => applyProposal(store, args.proposal ?? args));
-    case "rsh_submit_verdict": return withWorkspaceWriteLock(store.root, () => submitVerification(store, args.verdict ?? args));
-    case "rsh_revoke": return withWorkspaceWriteLock(store.root, () => cascadeRevoke(store, args.fact_id, args.reason, args.authority ?? "operator"));
-    case "rsh_diff": return semanticDiff(store.root, args.from, args.to ?? "HEAD");
-    case "rsh_log": return { graph: graphLog(store) };
-    case "rsh_doctor": return doctor(store);
+    case "rsh_resume": { const result = portable(await resumeResearch(root, { all: args.all }), root); return response(markdown(result, "Research state"), result); }
+    case "rsh_find": { const { query = "", ...options } = args; const result = portable(await findRecords(root, query, options), root); return response(formatFindMarkdown(result), result, recordLinks(result.map((item) => item.id))); }
+    case "rsh_get": { const result = portable(await getItem(root, args.id), root); return response(recordDocument(result), result, recordLinks([args.id])); }
+    case "rsh_checkpoint": { const document = serializeCheckpointDocument(args); const result = portable(await checkpoint(root, document, { isText: true }), root); const id = resultId(result); return response(writeMarkdown("Checkpoint saved", id), result, links(id)); }
+    case "rsh_mark": { const result = portable(await markRecord(root, args.record_id, args.state), root); const id = resultId(result, args.record_id); return response(writeMarkdown("Record state updated", id, args.state), result, links(id)); }
+    case "rsh_status": { const result = portable(await statusWorkspace(root), root); return response(formatStatusMarkdown(result), result); }
+    case "rsh_doctor": { const result = portable(await doctor(root), root); return response(formatDoctorMarkdown(result), result); }
     default: throw new Error(`Unknown tool ${name}`);
   }
 }
 
-function response(id, result) {
-  return { jsonrpc: "2.0", id, result };
-}
-
-function errorResponse(id, error) {
-  return { jsonrpc: "2.0", id, error: { code: -32000, message: error instanceof Error ? error.message : String(error) } };
-}
-
-export async function runMcp({ role = process.env.RSH_ROLE ?? "agent", root } = {}) {
-  const store = new Store(root);
-  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    let request;
-    try { request = JSON.parse(line); }
-    catch (error) { process.stdout.write(`${JSON.stringify(errorResponse(null, new Error(`Invalid JSON: ${error.message}`)))}\n`); continue; }
+function registerResources(server, root) {
+  server.registerResource("state", "rsh://state", { description: "Current resumable RSH research state", mimeType: "text/markdown" }, async (uri) => {
     try {
-      let result;
-      if (request.method === "initialize") {
-        result = { protocolVersion: request.params?.protocolVersion ?? "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "rsh", version: VERSION } };
-      } else if (request.method === "notifications/initialized") {
-        continue;
-      } else if (request.method === "ping") {
-        result = {};
-      } else if (request.method === "tools/list") {
-        result = { tools: toolsFor(role) };
-      } else if (request.method === "tools/call") {
-        const data = callTool(store, role, request.params?.name, request.params?.arguments ?? {});
-        result = { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], structuredContent: data, isError: false };
-      } else {
-        throw new Error(`Unsupported MCP method ${request.method}`);
-      }
-      if (request.id !== undefined) process.stdout.write(`${JSON.stringify(response(request.id, result))}\n`);
-    } catch (error) {
-      if (request.id !== undefined) process.stdout.write(`${JSON.stringify(errorResponse(request.id, error))}\n`);
-    }
-  }
+      const result = portable(await resumeResearch(root, {}), root);
+      return { contents: [{ uri: uri.toString(), mimeType: "text/markdown", text: markdown(result, "Research state") }] };
+    } catch (error) { throw new McpError(ErrorCode.InvalidParams, safeError(error, root)); }
+  });
+  server.registerResource("record", new ResourceTemplate("rsh://record/{id}", { list: undefined }),
+    { description: "One complete RSH record", mimeType: "text/markdown" }, async (uri, { id }) => {
+      try {
+        const result = portable(await getItem(root, RECORD_ID.parse(id)), root);
+        return { contents: [{ uri: uri.toString(), mimeType: "text/markdown", text: recordDocument(result) }] };
+      } catch (error) { throw new McpError(ErrorCode.InvalidParams, safeError(error, root)); }
+    });
+}
+
+export async function startMcpServer({ root = process.cwd(), transport } = {}) {
+  const server = new McpServer({ name: "rsh", version: VERSION });
+  registerResources(server, root);
+  for (const [name, definition] of Object.entries(TOOLS)) server.registerTool(name, definition, async (args) => {
+    try { return await callTool(root, name, args); }
+    catch (error) { throw new Error(safeError(error, root)); }
+  });
+  const capabilities = server.server.getCapabilities();
+  if (capabilities.resources) delete capabilities.resources.listChanged;
+  if (capabilities.tools) delete capabilities.tools.listChanged;
+  await server.connect(transport ?? new StdioServerTransport());
+  return server;
+}
+
+export async function runMcp(options = {}) {
+  return startMcpServer(options);
 }

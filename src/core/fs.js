@@ -5,62 +5,33 @@ export function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
 }
 
-export function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-export function writeJsonAtomic(file, value) {
-  ensureDir(path.dirname(file));
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  fs.renameSync(tmp, file);
-}
-
-export function appendJsonl(file, value) {
-  ensureDir(path.dirname(file));
-  fs.appendFileSync(file, `${JSON.stringify(value)}\n`, "utf8");
-}
-
-export function readJsonl(file) {
-  if (!fs.existsSync(file)) return [];
-  return fs
-    .readFileSync(file, "utf8")
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line, index) => {
-      try {
-        return JSON.parse(line);
-      } catch (error) {
-        throw new Error(`Invalid JSONL at ${file}:${index + 1}: ${error.message}`);
-      }
-    });
-}
-
-export function listFiles(dir, predicate = () => true) {
-  if (!fs.existsSync(dir)) return [];
-  const output = [];
-  const visit = (current) => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) visit(full);
-      else if (predicate(full)) output.push(full);
-    }
-  };
-  visit(dir);
-  return output.sort();
-}
-
-export function copyFileIfMissing(source, target) {
-  if (fs.existsSync(target)) return false;
-  ensureDir(path.dirname(target));
-  fs.copyFileSync(source, target);
-  return true;
-}
-
-export function safeRead(file, fallback = "") {
+export function commitFileBatch(files) {
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const staged = [];
   try {
-    return fs.readFileSync(file, "utf8");
-  } catch {
-    return fallback;
+    for (const [index, item] of files.entries()) {
+      ensureDir(path.dirname(item.target));
+      const temporary = `${item.target}.txn-${token}-${index}`;
+      fs.writeFileSync(temporary, item.contents, { encoding: "utf8", flag: "wx" });
+      const backup = fs.existsSync(item.target) ? `${item.target}.backup-${token}-${index}` : null;
+      const stagedItem = { ...item, temporary, backup, committed: false };
+      staged.push(stagedItem);
+      if (backup) fs.copyFileSync(item.target, backup, fs.constants.COPYFILE_EXCL);
+    }
+    for (const item of staged) {
+      fs.renameSync(item.temporary, item.target);
+      item.committed = true;
+    }
+  } catch (error) {
+    for (const item of [...staged].reverse()) {
+      if (item.committed) {
+        if (item.backup) fs.copyFileSync(item.backup, item.target);
+        else fs.rmSync(item.target, { force: true });
+      }
+      fs.rmSync(item.temporary, { force: true });
+      if (item.backup) fs.rmSync(item.backup, { force: true });
+    }
+    throw error;
   }
+  for (const item of staged) if (item.backup) fs.rmSync(item.backup, { force: true });
 }

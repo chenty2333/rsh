@@ -1,188 +1,186 @@
 # RSH
 
-> Git remembers what changed. RSH remembers what was tried, what failed, what is trusted, and whether the next research route is already dead.
+RSH is a small, local, Git-native research state tool. It keeps `RESEARCH.md`,
+complete knowledge documents in `.rsh/records/*.md`, and `rg`-based search over
+those Markdown files. Relations are structured links between documents, not a
+separate graph or inference system. RSH does not decide mathematical truth.
 
-RSH is a **private-first, Git-native compiler and static analyzer for persistent research state**. It turns raw research traces into two connected graphs:
+## Requirements and install
 
-- an **Exploration Graph** of plans, attempts, barriers, counterexamples, dead ends, and open gaps;
-- a **Truth Graph** of workspace-accepted facts and their proof dependencies.
-
-The primary workflow is:
-
-```text
-orient → check → research → record → verify
-```
-
-RSH is not an autonomous theorem prover, a replacement for Git, or a central knowledge database. Humans and agents work normally in a Git repository; RSH adds typed research state, graph-first retrieval, auditable preflight analysis, and a verifier-gated truth layer.
-
-## Install
-
-From this checkout:
+- Node.js 20 or newer
+- [ripgrep (`rg`)](https://github.com/BurntSushi/ripgrep)
 
 ```bash
 npm install
 npm link
 ```
 
-After publication to npm:
-
-```bash
-npm install -g rsh-research
-```
-
 ## Quick start
 
 ```bash
-mkdir my-project && cd my-project
-rsh init --name "My research project"
-
-# Optional benchmark data
-rsh seed gabidulin
-rsh index
-
-rsh orient "polynomial-extension Gabidulin decoding"
-rsh check --ir .rsh/examples/blocked-route.json
-rsh log --graph
-```
-
-`rsh init` initializes Git when necessary, locates the repository's Git root, and creates the workspace there:
-
-```text
-.rsh/
-├── workspace.json
-├── findings/        # Exploration Graph source objects
-├── facts/           # Truth Graph, content-addressed Markdown facts
-├── graph/edges.jsonl
-├── evidence/
-├── traces/
-├── events.jsonl
-├── verifications.jsonl
-├── revocations.jsonl
-├── locks/           # local single-writer coordination; gitignored
-└── cache/           # derived and gitignored
-```
-
-It also updates `.gitignore`, `AGENTS.md`, and `CLAUDE.md`, installs project-local Codex and Claude Code skills under `.agents/skills/rsh/` and `.claude/skills/rsh/`, and writes `.mcp.json`. Existing skill files are preserved during a normal repeated init. Use `--force` deliberately: it rebuilds the workspace identity and configuration and overwrites the generated skill and MCP integration files.
-
-## Core commands
-
-```bash
+mkdir my-research && cd my-research
+git init
 rsh init
-rsh status
-rsh orient [query]
-rsh compile <plan>
-rsh check --ir route.json
-rsh check --command './my-route-compiler' "natural-language plan"
-rsh check --heuristic "natural-language plan" # experimental demo only
-rsh record --file proposal.json
-rsh verify FINDING --verdict accepted --method human_review --authority Alice --payload fact.json
-rsh revoke FACT --reason "audit failure"
+rsh resume
+```
+
+Initialization creates `RESEARCH.md` and matching resume/checkpoint skills under
+`.agents/skills/` and `.claude/skills/`. `.rsh/records/` is the record store;
+`.rsh/locks/` is only for local write locking.
+
+## Research frontier
+
+`RESEARCH.md` is normal Markdown. Its managed open tree looks like this:
+
+```markdown
+## Open
+
+- [Q-a13] Prove the degenerate upper bound
+  - [D-4z1] Try a direct spectral estimate
+```
+
+`Q-` identifies a question, `D-` a direction, and `R-` a Record. Every ID has
+exactly three lowercase base36 characters (`0-9a-z`). Only open frontier items
+appear here; Git and stored frontier actions preserve history.
+
+## Checkpoints and Records
+
+A checkpoint is TOML frontmatter followed by non-empty Markdown:
+
+```markdown
++++
+kind = "result"
+state = "unchecked"
+
+[[relations]]
+type = "rsh:about"
+target = "D-4z1"
+
+[[relations]]
+type = "rsh:depends_on"
+target = "R-a9z"
+
+[[relations]]
+type = "rsh:derived_from"
+target = "R-b2c"
+
+[assertion]
+subject = "R-a9z"
+predicate = "math:generalizes"
+object = "R-b2c"
+
+[[frontier]]
+action = "close"
+id = "D-4z1"
+outcome = "resolved"
++++
+
+# A uniform estimate follows from the reusable bound
+
+## Conclusion
+
+State one main conclusion completely.
+
+## Argument
+
+Give the evidence or proof, citing `R-a9z` where it is actually used.
+
+## Scope
+
+Record assumptions, limitations, and exceptions.
+
+## Reuse
+
+Optionally explain how to apply the conclusion elsewhere.
+```
+
+Apply it with `rsh checkpoint note.md`. RSH validates the record and frontier
+transaction before publishing it under a generated `R-xxx` ID.
+Each successful frontier `open` action also stores an automatic `rsh:about`
+relation from that Record to the newly generated Q/D item, so the originating
+Record appears immediately in the new item's resume summary.
+
+Each `result` holds one main conclusion with its complete argument and scope.
+Auxiliary proof steps stay in the body; split out only an independently reusable
+intermediate result. The headings above are recommended, not required. A
+`dead_end` records the attempted goal, failure mechanism, evidence, scope, and
+`retry_if` conditions. An `experience` records an observation, its context, a
+reusable method, and its misuse boundary.
+
+Relations use lowercase `namespace:predicate_name` names:
+
+- `rsh:about` targets an existing or historical `Q-`/`D-` and groups Records
+  with the frontier during resume.
+- `rsh:depends_on` targets an existing `R-` and produces reminders.
+- `rsh:derived_from` targets an existing `R-` and records provenance.
+
+Custom relations such as `math:generalizes`, `alice:refines`, and
+`lean:formalizes` are stored and searchable without automatic reasoning,
+withdrawal, or scheduling semantics. Explanations belong in the body, not in
+relation labels or notes.
+
+A `result` whose main conclusion is itself a relation may have one `[assertion]`
+as a machine-readable projection. Its subject and object must resolve to local
+`Q-`, `D-`, or `R-` IDs. It never replaces the body, and ordinary results need
+no assertion. Readers can derive mathematical inverse relations when needed.
+
+States are `unchecked`, `checked`, and `withdrawn`. They are local workflow
+markers, not truth values. State does not propagate through relations, and
+closing a frontier item does not require a checked Record.
+
+## Commands
+
+```text
+rsh init
+rsh resume [--all]
+rsh find QUERY [--regex] [--kind KIND] [--state STATE] [--limit N]
+rsh checkpoint FILE.md
 rsh get ID
-rsh relations [ID]
-rsh log --graph
-rsh diff HEAD~2 HEAD
-rsh index
-rsh import list
-rsh import danus /path/to/project
-rsh import jupyter notebook.ipynb
-rsh import chat transcript.json
-rsh import git .
+rsh mark RECORD_ID unchecked|checked|withdrawn
+rsh status
 rsh doctor
-rsh mcp --role agent
+rsh mcp
 ```
 
-## Research compiler
+`rsh resume` groups Records through `rsh:about` and flags withdrawn
+dependencies. `rsh get R-xxx` prints the raw Record followed by derived
+backlinks and missing or withdrawn dependency reminders. `rsh find
+<ID>` uses `rg` to find relations, assertion endpoints, and Markdown references.
+Other searches are fixed-string smart-case unless `--regex` is supplied; kind,
+state, and limit filters still apply. There is no index or cache.
 
-Natural-language research plans require model intelligence. RSH therefore treats the model as a **semantic compiler**, not as the authority:
+## MCP
 
-```text
-natural language
-    ↓ model / agent
-Research IR
-    ↓ schema validation
-static analyzer
-    ↓ explicit proof trace
-collision report
+The MCP server exposes `rsh_resume`, `rsh_find`, `rsh_get`, `rsh_checkpoint`,
+`rsh_mark`, `rsh_status`, and `rsh_doctor`, plus `rsh://state` and
+`rsh://record/{id}`. `rsh_checkpoint` accepts structured fields rather than a
+TOML document string:
+
+```json
+{
+  "kind": "result",
+  "body": "# Conclusion\n\nA complete conclusion.\n",
+  "relations": [
+    { "type": "rsh:depends_on", "target": "R-a9z" }
+  ],
+  "frontier": [
+    { "action": "open", "kind": "question", "text": "What remains open?" }
+  ]
+}
 ```
 
-Formal preflight accepts only a complete, schema-validated `rsh.route.v1` document. An agent should produce typed IR and call:
-
-```bash
-rsh check --ir route.json
-```
-
-Alternatively, `rsh check --command CMD` passes the plan to an explicitly supplied external compiler and validates its JSON output. Natural-language input is never silently compiled during formal checking. The built-in heuristic is available only through the explicit `--heuristic` experimental/demo flag and is low confidence.
-
-## Preflight outcomes
-
-- `EXACT_DUPLICATE`
-- `DOMINATED_DEADEND`
-- `COUNTEREXAMPLE_APPLIES`
-- `PARTIAL_COLLISION`
-- `GENUINE_FORK`
-- `RELATED`
-- `CLEAR`
-
-The analyzer compares targets, mechanisms, assumptions, exclusions, quantifiers, parameter regimes, explicit implication relations, and counterexample traits. An extra assumption is not considered a genuine fork unless the graph records that it excludes the old obstruction.
-
-## Trust model
-
-Findings are awareness, not truth. A finding enters the Truth Graph only through a verification receipt accepted by the workspace policy. Verification method, authority, evidence grade, mathematical resolution, and provenance remain distinct fields.
-
-By default, accepted truth methods are:
-
-- human review;
-- reproduced computation;
-- formal verification;
-- import from a verified external fact graph.
-
-An LLM audit is recorded, but it is not accepted as truth unless the workspace explicitly opts in.
-
-Revoking a fact cascades through all truth-graph descendants. Exploration history is preserved.
-
-## MCP and agent skills
-
-`rsh init` installs:
-
-```text
-.agents/skills/rsh/SKILL.md
-.claude/skills/rsh/SKILL.md
-.mcp.json
-```
-
-MCP roles are enforced by the exposed tool surface:
-
-- `agent`: orient, check, read, and propose findings;
-- `verifier`: read and submit verdicts, but cannot propose findings;
-- `operator`: full workspace controls, including revocation and diff.
-
-## Importers
-
-Import is an adapter interface, not a core dependency. Built-ins currently include:
-
-- `danus`: global memory and LLM-verified facts → `llm_audited` findings by default; Truth import requires the explicit `allow_llm_audit_as_truth` workspace override; predecessor DAGs, status receipts, revocations, glossary, references, and source hashes are preserved; optional worker local memory → traces;
-- `jupyter`: cells and outputs → trace layer;
-- `chat`: JSON/JSONL conversations → trace layer;
-- `git`: commit history → trace layer.
-
-Danus can be a research runtime. RSH is the repository and static analyzer it writes into.
-
-## Storage principle
-
-**Files and Git are authoritative. Indexes are disposable.**
-
-`rsh index` builds a local BM25-style lexical index and graph lookup cache. An optional external embedding command can add semantic reranking, but embeddings never become a correctness source.
-
-## Local write coordination
-
-Workspace initialization, canonical CLI/MCP writes, and index rebuilds take one workspace-exclusive lock in `.rsh/locks` for the entire operation. This prevents local concurrent writers from interleaving a multi-file update or publishing a stale derived index; lock holders identify their process, host, and acquisition time, and proven dead same-host holders can be reclaimed. RSH intentionally does not claim cross-file transactions, distributed locking, or Git merge conflict resolution. The internal `Store` API is not a concurrent transaction API.
+`kind` and a non-empty Markdown `body` are required. `state`, `scope`,
+`retry_if`, `relations`, `assertion`, and `frontier` are optional. The tool
+constructs the canonical TOML document internally and uses the same validation,
+locking, and atomic write path as the CLI.
 
 ## Development
 
 ```bash
 npm test
 npm run check
-npm pack --dry-run
+npm run pack:dry
 ```
 
-See `docs/ARCHITECTURE.md`, `docs/DATA_MODEL.md`, `docs/SECURITY.md`, `docs/PRIOR_ART.md`, and `docs/ADAPTERS.md`.
+See `docs/CLI.md`, `docs/DATA_MODEL.md`, `docs/ARCHITECTURE.md`, and
+`docs/SECURITY.md`.

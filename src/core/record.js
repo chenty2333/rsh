@@ -1,163 +1,307 @@
-import { SCHEMAS } from "./constants.js";
-import { shortHash } from "./canonical.js";
-import { serializeDocument } from "./doc.js";
-import { validateEdge, validateEvidence, validateFinding, validateJsonSerializable } from "./schema.js";
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
+import * as fsCore from "./fs.js";
+import { assertWorkspaceLayout, workspacePaths } from "./paths.js";
+import { withWorkspaceWriteLock } from "./write-lock.js";
+import { createFrontierId, isFrontierId, parseFrontier, replaceOpenSection } from "./frontier.js";
 
-function now() {
-  return new Date().toISOString();
+const ID_SPACE = 36 ** 3;
+const ID = /^R-[0-9a-z]{3}$/;
+const OBJECT_ID = /^[QDR]-[0-9a-z]{3}$/;
+const PREDICATE = /^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$/;
+const KINDS = new Set(["result", "dead_end", "experience"]);
+const STATES = new Set(["unchecked", "checked", "withdrawn"]);
+const OUTCOMES = new Set(["resolved", "exhausted", "abandoned", "superseded"]);
+const INPUT_FIELDS = new Set(["kind", "state", "scope", "retry_if", "relations", "assertion", "frontier"]);
+const STORED_FIELDS = new Set([...INPUT_FIELDS, "id", "created_at"]);
+const ACTION_FIELDS = Object.freeze({
+  open: new Set(["action", "kind", "text", "parent"]),
+  close: new Set(["action", "id", "outcome"]),
+  revise: new Set(["action", "id", "text", "parent"]),
+  reopen: new Set(["action", "id", "parent"])
+});
+const STORED_ACTION_FIELDS = new Set(["action", "id", "outcome", "before", "after"]);
+const SNAPSHOT_FIELDS = new Set(["kind", "text", "parent"]);
+const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function plain(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
-
-function generateId(kind, title) {
-  const prefix = {
-    problem: "P",
-    plan: "PL",
-    attempt: "A",
-    conjecture: "CJ",
-    proof_attempt: "PA",
-    counterexample: "C",
-    dead_end: "D",
-    barrier: "B",
-    obstacle: "O",
-    direction: "DR",
-    open_gap: "G",
-    experiment: "X",
-    computation: "CP",
-    elaboration: "EL",
-    guidance: "GD"
-  }[kind] ?? "R";
-  return `${prefix}-${shortHash(`${title}:${Date.now()}:${Math.random()}`, 10)}`;
+function rejectUnknown(value, allowed, label) {
+  for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`${label} contains unknown field ${key}`);
 }
-
-function objectLayers(store, id) {
-  const layers = [];
-  if (store.hasFinding(id)) layers.push("finding");
-  if (store.hasFact(id)) layers.push("fact");
-  if (store.readEvidence(id)) layers.push("evidence");
-  return layers;
+function stringArray(value, label) {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim())) throw new Error(`${label} must be an array of non-empty strings`);
 }
-
-function assertObjectCanBeWritten(store, id, layer, replace) {
-  const existing = objectLayers(store, id);
-  const conflicts = existing.filter((item) => item !== layer);
-  if (conflicts.length > 0) throw new Error(`${layer} ${id} conflicts with existing ${conflicts.join(" and ")}`);
-  if (existing.includes(layer) && !replace) throw new Error(`${layer[0].toUpperCase()}${layer.slice(1)} ${id} already exists`);
+function validatePredicate(value, label) {
+  if (typeof value !== "string" || !PREDICATE.test(value)) throw new Error(`${label} must use lowercase namespace:predicate_name format`);
 }
-
-export function applyProposal(store, proposal, options = {}) {
-  if (!proposal || typeof proposal !== "object") throw new Error("Proposal must be an object");
-  const evidence = (proposal.evidence ?? []).map((item) => validateEvidence({
-      schema: SCHEMAS.evidence,
-      id: item.id ?? `E-${shortHash(JSON.stringify(item), 12)}`,
-      kind: item.kind ?? "note",
-      grade: item.grade ?? "self_reported",
-      source: item.source ?? {},
-      content_hash: item.content_hash ?? null,
-      created_at: item.created_at ?? now(),
-      ...item
-    }));
-  const findings = (proposal.findings ?? proposal.objects ?? []).map((item) => {
-    if (item.trust === "fact" || item.schema === SCHEMAS.fact) throw new Error("`rsh record` cannot create facts. Use the verification gate.");
-    const id = item.id ?? generateId(item.kind, item.title ?? item.claim ?? "finding");
-    const record = validateFinding({
-      schema: SCHEMAS.finding,
-      id,
-      kind: item.kind,
-      title: item.title ?? item.claim ?? id,
-      state: item.state ?? (item.verifiable ? "unverified" : "open"),
-      trust: "finding",
-      verifiable: item.verifiable ?? ["proof_attempt", "counterexample", "computation"].includes(item.kind),
-      author: item.author ?? proposal.author ?? "unknown",
-      problem_id: item.problem_id ?? proposal.problem_id ?? "workspace",
-      route: item.route ?? null,
-      failure: item.failure ?? null,
-      outcome: item.outcome ?? null,
-      traits: item.traits ?? [],
-      preserves: item.preserves ?? [],
-      predecessors: item.predecessors ?? [],
-      evidence_refs: item.evidence_refs ?? [],
-      glossary: item.glossary ?? {},
-      external_refs: item.external_refs ?? [],
-      created_at: item.created_at ?? now(),
-      updated_at: item.updated_at ?? now()
-    });
-    const sections = item.sections ?? {
-      Claim: item.claim ?? item.statement ?? "",
-      Evidence: item.evidence ?? "",
-      "Failure boundary": item.failure_boundary ?? "",
-      "What survives": Array.isArray(item.preserves) ? item.preserves.join("\n") : item.survives ?? "",
-      Notes: item.notes ?? ""
-    };
-    serializeDocument(record, sections);
-    return { record, sections };
+function validateRelations(value) {
+  if (!Array.isArray(value)) throw new Error("record.relations must be an array");
+  const seen = new Set();
+  value.forEach((relation, index) => {
+    const label = `record.relations[${index}]`;
+    if (!plain(relation)) throw new Error(`${label} must be an object`);
+    rejectUnknown(relation, new Set(["type", "target"]), label);
+    validatePredicate(relation.type, `${label}.type`);
+    if (typeof relation.target !== "string" || !OBJECT_ID.test(relation.target)) throw new Error(`${label}.target must be a Q-, D-, or R- ID`);
+    const key = `${relation.type}\0${relation.target}`;
+    if (seen.has(key)) throw new Error(`record.relations contains duplicate relation ${relation.type} -> ${relation.target}`);
+    seen.add(key);
   });
-  const edges = (proposal.edges ?? proposal.relations ?? []).map((item) => validateEdge({
-      schema: SCHEMAS.edge,
-      from: item.from,
-      type: item.type,
-      to: item.to,
-      at: item.at ?? now(),
-      author: item.author ?? proposal.author ?? "unknown",
-      provenance: item.provenance ?? null
-    }));
-
-  const evidenceIds = new Set();
-  for (const record of evidence) {
-    if (evidenceIds.has(record.id)) throw new Error(`Duplicate evidence ${record.id} in proposal`);
-    evidenceIds.add(record.id);
-  }
-  const findingIds = new Set();
-  for (const { record } of findings) {
-    if (findingIds.has(record.id)) throw new Error(`Duplicate finding ${record.id} in proposal`);
-    if (evidenceIds.has(record.id)) throw new Error(`Object ID ${record.id} is used by both finding and evidence in proposal`);
-    findingIds.add(record.id);
-  }
-
-  for (const record of evidence) assertObjectCanBeWritten(store, record.id, "evidence", Boolean(options.replace));
-  for (const { record } of findings) assertObjectCanBeWritten(store, record.id, "finding", Boolean(options.replace));
-
-  for (const { record } of findings) {
-    for (const evidenceId of record.evidence_refs ?? []) {
-      if (!evidenceIds.has(evidenceId) && !store.readEvidence(evidenceId)) {
-        throw new Error(`Finding ${record.id} references missing evidence ${evidenceId}`);
-      }
-    }
-    for (const predecessor of record.predecessors ?? []) {
-      if (!store.hasFact(predecessor)) throw new Error(`Finding ${record.id} references missing predecessor fact ${predecessor}`);
-    }
-  }
-
-  const plannedIds = new Set([...evidenceIds, ...findingIds]);
-  const existingEdgeKeys = new Set(store.edges().map((edge) => `${edge.from}\t${edge.type}\t${edge.to}`));
-  const proposalEdgeKeys = new Set();
-  const edgesToWrite = [];
-  for (const edge of edges) {
-    if (!plannedIds.has(edge.from) && !store.get(edge.from)) throw new Error(`Edge source ${edge.from} does not exist`);
-    if (!plannedIds.has(edge.to) && !store.get(edge.to)) throw new Error(`Edge target ${edge.to} does not exist`);
-    const key = `${edge.from}\t${edge.type}\t${edge.to}`;
-    if (proposalEdgeKeys.has(key)) throw new Error(`Duplicate edge ${edge.from}:${edge.type}:${edge.to} in proposal`);
-    proposalEdgeKeys.add(key);
-    if (!existingEdgeKeys.has(key)) edgesToWrite.push(edge);
-  }
-
-  const written = { findings: [], evidence: [], edges: [] };
-  validateJsonSerializable({
-    message: proposal.message ?? null,
-    findings: findings.map(({ record }) => record.id),
-    evidence: evidence.map((record) => record.id),
-    edges: edgesToWrite.map((edge) => `${edge.from}:${edge.type}:${edge.to}`)
-  }, "proposal event");
-  for (const record of evidence) {
-    store.writeEvidence(record, { replace: options.replace });
-    written.evidence.push(record.id);
-  }
-  for (const { record, sections } of findings) {
-    store.writeFinding(record, sections, { replace: options.replace });
-    written.findings.push(record.id);
-  }
-  for (const edge of edgesToWrite) {
-    store.addEdge(edge);
-    written.edges.push(`${edge.from}:${edge.type}:${edge.to}`);
-  }
-  store.event("PROPOSAL_APPLIED", { message: proposal.message ?? null, ...written });
-  return written;
 }
+function validateAssertion(value) {
+  if (!plain(value)) throw new Error("record.assertion must be a single object");
+  rejectUnknown(value, new Set(["subject", "predicate", "object"]), "record.assertion");
+  if (!OBJECT_ID.test(value.subject ?? "")) throw new Error("record.assertion.subject must be a Q-, D-, or R- ID");
+  validatePredicate(value.predicate, "record.assertion.predicate");
+  if (!OBJECT_ID.test(value.object ?? "")) throw new Error("record.assertion.object must be a Q-, D-, or R- ID");
+}
+function snapshot(node) { return { kind: node.kind, text: node.text, parent: node.parent ?? "" }; }
+function validateSnapshot(value, label) {
+  if (!plain(value)) throw new Error(`${label} must be an object`);
+  rejectUnknown(value, SNAPSHOT_FIELDS, label);
+  if ((value.kind !== "question" && value.kind !== "direction") || typeof value.text !== "string" || !value.text.trim() || typeof value.parent !== "string" || (value.parent && !isFrontierId(value.parent))) throw new Error(`${label} is not a valid frontier snapshot`);
+  if (/[\r\n]/.test(value.text)) throw new Error(`${label}.text must stay on one line`);
+}
+function validateStoredAction(value, label) {
+  if (!plain(value)) throw new Error(`${label} must be an object`);
+  rejectUnknown(value, STORED_ACTION_FIELDS, label);
+  if (!ACTION_FIELDS[value.action] || !isFrontierId(value.id)) throw new Error(`${label} is invalid`);
+  if (value.outcome !== undefined && !OUTCOMES.has(value.outcome)) throw new Error(`${label}.outcome is invalid`);
+  if (value.before !== undefined) validateSnapshot(value.before, `${label}.before`);
+  if (value.after !== undefined) validateSnapshot(value.after, `${label}.after`);
+  const expectedKind = value.id[0] === "Q" ? "question" : "direction";
+  for (const [name, valueSnapshot] of [["before", value.before], ["after", value.after]]) {
+    if (valueSnapshot && valueSnapshot.kind !== expectedKind) throw new Error(`${label}.${name}.kind contradicts ${value.id}`);
+  }
+  if (value.action === "open" && (!value.after || value.before || value.outcome)) throw new Error(`${label} has invalid open snapshots`);
+  if (value.action === "close" && (!value.before || value.after || !OUTCOMES.has(value.outcome))) throw new Error(`${label} has invalid close snapshots`);
+  if ((value.action === "revise" || value.action === "reopen") && (!value.before || !value.after || value.outcome)) throw new Error(`${label} has invalid snapshots`);
+}
+function validateInputAction(action, label) {
+  if (!plain(action) || !ACTION_FIELDS[action.action]) throw new Error(`${label} must be a valid frontier action`);
+  rejectUnknown(action, ACTION_FIELDS[action.action], label);
+  if (action.action === "open") {
+    if (action.kind !== "question" && action.kind !== "direction") throw new Error(`${label}.kind must be question or direction`);
+    if (typeof action.text !== "string" || !action.text.trim()) throw new Error(`${label}.text must be non-empty`);
+  } else if (!isFrontierId(action.id)) throw new Error(`${label}.id is invalid`);
+  if (action.action === "close" && !OUTCOMES.has(action.outcome)) throw new Error(`${label}.outcome is invalid`);
+  if (action.action === "revise" && !Object.hasOwn(action, "text") && !Object.hasOwn(action, "parent")) throw new Error(`${label} requires text or parent`);
+  if (Object.hasOwn(action, "text") && (typeof action.text !== "string" || !action.text.trim())) throw new Error(`${label}.text must be non-empty`);
+  if (Object.hasOwn(action, "text") && /[\r\n]/.test(action.text)) throw new Error(`${label}.text must stay on one line`);
+  if (Object.hasOwn(action, "parent") && action.parent !== "" && !isFrontierId(action.parent)) throw new Error(`${label}.parent is invalid`);
+}
+
+export function validateRecord(record, { input = false } = {}) {
+  if (!plain(record)) throw new Error("record frontmatter must be an object");
+  rejectUnknown(record, input ? INPUT_FIELDS : STORED_FIELDS, "record");
+  if (!KINDS.has(record.kind)) throw new Error("record.kind must be result, dead_end, or experience");
+  if (record.state === undefined && input) record.state = "unchecked";
+  if (!STATES.has(record.state)) throw new Error("record.state is invalid");
+  if (record.retry_if === undefined && input) record.retry_if = [];
+  stringArray(record.retry_if, "record.retry_if");
+  if (record.relations === undefined && input) record.relations = [];
+  validateRelations(record.relations);
+  if (record.assertion !== undefined) validateAssertion(record.assertion);
+  if (record.assertion !== undefined && record.kind !== "result") throw new Error("record.assertion is only allowed on result records");
+  if (record.scope !== undefined && typeof record.scope !== "string") throw new Error("record.scope must be a string");
+  if (record.kind === "dead_end" && (typeof record.scope !== "string" || !record.scope.trim())) throw new Error("dead_end records require non-empty scope");
+  if (record.frontier === undefined && input) record.frontier = [];
+  if (!Array.isArray(record.frontier)) throw new Error("record.frontier must be an array");
+  if (input) record.frontier.forEach((action, index) => validateInputAction(action, `record.frontier[${index}]`));
+  else {
+    if (!ID.test(record.id ?? "")) throw new Error("record.id is invalid");
+    if (typeof record.created_at !== "string" || !ISO_TIMESTAMP.test(record.created_at) || Number.isNaN(Date.parse(record.created_at))) throw new Error("record.created_at must be an ISO timestamp");
+    record.frontier.forEach((action, index) => validateStoredAction(action, `record.frontier[${index}]`));
+  }
+  return record;
+}
+
+export function parseRecord(text, options = {}) {
+  if (typeof text !== "string" || !text.startsWith("+++")) throw new Error("record must begin with +++ TOML frontmatter");
+  const firstEnd = text.indexOf("\n");
+  if (firstEnd < 0 || text.slice(0, firstEnd).replace(/\r$/, "") !== "+++") throw new Error("record opening delimiter must be on its own line");
+  const closing = /^\+\+\+[ \t]*\r?$/gm; closing.lastIndex = firstEnd + 1;
+  const match = closing.exec(text);
+  if (!match) throw new Error("record is missing closing +++ delimiter");
+  let metadata;
+  try { metadata = parseToml(text.slice(firstEnd + 1, match.index)); } catch (error) { throw new Error(`Invalid record TOML: ${error.message}`); }
+  const after = text.indexOf("\n", match.index);
+  const body = after < 0 ? "" : text.slice(after + 1);
+  if (!body.trim()) throw new Error("record body must contain non-empty Markdown text");
+  validateRecord(metadata, options);
+  return { ...metadata, body };
+}
+export function serializeRecord(record) {
+  if (!plain(record)) throw new Error("record must be an object");
+  const { body = "", ...metadata } = record;
+  if (typeof body !== "string" || !body.trim()) throw new Error("record body must contain non-empty Markdown text");
+  validateRecord(metadata);
+  return `+++\n${stringifyToml(metadata).trimEnd()}\n+++\n${body}`;
+}
+export function serializeCheckpointDocument(input) {
+  if (!plain(input)) throw new Error("checkpoint input must be an object");
+  const { body = "", ...metadata } = input;
+  if (typeof body !== "string" || !body.trim()) throw new Error("record body must contain non-empty Markdown text");
+  validateRecord(metadata, { input: true });
+  return `+++\n${stringifyToml(metadata).trimEnd()}\n+++\n${body}`;
+}
+function locations(root) {
+  const paths = workspacePaths(path.resolve(root));
+  return { paths, records: paths.records ?? path.join(paths.rsh, "records"), research: paths.research ?? path.join(paths.root, "RESEARCH.md") };
+}
+function readRecordFile(file) {
+  const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!stat || stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Invalid RSH record file ${path.basename(file)}`);
+  return parseRecord(fs.readFileSync(file, "utf8"));
+}
+export function listRecords(root) {
+  assertWorkspaceLayout(root);
+  const { records } = locations(root);
+  return fs.readdirSync(records).map((name) => {
+    if (!/^R-[0-9a-z]{3}\.md$/.test(name)) throw new Error(`Invalid RSH record filename ${name}`);
+    const record = readRecordFile(path.join(records, name));
+    if (`${record.id}.md` !== name) throw new Error(`Record filename ${name} does not match stored ID ${record.id}`);
+    return record;
+  }).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id.localeCompare(b.id));
+}
+export function getRecord(root, id) {
+  if (!ID.test(id ?? "")) throw new Error("record ID is invalid");
+  assertWorkspaceLayout(root);
+  const file = path.join(locations(root).records, `${id}.md`);
+  return fs.existsSync(file) ? readRecordFile(file) : null;
+}
+function historicalFrontier(records) {
+  const ids = new Set();
+  for (const record of records) for (const action of record.frontier) ids.add(action.id);
+  return ids;
+}
+function latestClosedSnapshot(records, id) {
+  let found = null;
+  for (const record of records) for (const action of record.frontier) if (action.id === id) {
+    if (action.action === "close") found = action.before;
+    else if (action.action === "reopen" || action.action === "open") found = null;
+  }
+  return found;
+}
+function setParent(nodes, id, parent) {
+  if (parent === id) throw new Error(`Frontier entry ${id} cannot parent itself`);
+  if (parent != null && !nodes.some((node) => node.id === parent)) throw new Error(`Frontier parent ${parent} is not open`);
+  for (let cursor = parent; cursor != null;) {
+    if (cursor === id) throw new Error(`Moving ${id} below ${parent} would create a cycle`);
+    cursor = nodes.find((node) => node.id === cursor)?.parent ?? null;
+  }
+}
+function applyActions(rawActions, initialNodes, records, knownFrontier) {
+  const nodes = initialNodes.map(({ id, kind, text, parent }) => ({ id, kind, text, parent }));
+  const persisted = [];
+  for (let index = 0; index < rawActions.length; index += 1) {
+    const action = rawActions[index];
+    if (action.action === "open") {
+      const parent = action.parent || null; setParent(nodes, "__new__", parent);
+      const id = createFrontierId(action.kind, knownFrontier);
+      knownFrontier.add(id);
+      const node = { id, kind: action.kind, text: action.text, parent };
+      nodes.push(node); persisted.push({ action: "open", id, after: snapshot(node) }); continue;
+    }
+    const position = nodes.findIndex((node) => node.id === action.id);
+    if (action.action === "reopen") {
+      if (position >= 0) throw new Error(`Frontier entry ${action.id} is already open`);
+      const old = latestClosedSnapshot(records, action.id);
+      if (!old) throw new Error(`No closed snapshot exists for ${action.id}`);
+      const node = { id: action.id, kind: old.kind, text: old.text, parent: Object.hasOwn(action, "parent") ? (action.parent || null) : (old.parent || null) };
+      setParent(nodes, node.id, node.parent); nodes.push(node); persisted.push({ action: "reopen", id: node.id, before: old, after: snapshot(node) }); continue;
+    }
+    if (position < 0) throw new Error(`Frontier entry ${action.id} is not open`);
+    const oldNode = nodes[position];
+    if (action.action === "revise") {
+      const node = { ...oldNode, text: Object.hasOwn(action, "text") ? action.text : oldNode.text, parent: Object.hasOwn(action, "parent") ? (action.parent || null) : oldNode.parent };
+      setParent(nodes, node.id, node.parent); nodes[position] = node; persisted.push({ action: "revise", id: node.id, before: snapshot(oldNode), after: snapshot(node) }); continue;
+    }
+    const children = nodes.filter((node) => node.parent === action.id);
+    if (children.length) {
+      const future = rawActions.slice(index + 1);
+      const handled = children.every((child) => future.some((next) => next.id === child.id && (next.action === "close" || (next.action === "revise" && Object.hasOwn(next, "parent") && next.parent !== action.id))));
+      if (!handled) throw new Error(`Cannot close ${action.id} while it has open children`);
+    }
+    nodes.splice(position, 1); persisted.push({ action: "close", id: oldNode.id, outcome: action.outcome, before: snapshot(oldNode) });
+  }
+  for (const node of nodes) if (node.parent != null && !nodes.some((candidate) => candidate.id === node.parent)) throw new Error(`Frontier entry ${node.id} has closed parent ${node.parent}`);
+  return { nodes, persisted };
+}
+function readInput(fileOrText, isText) {
+  if (isText) return fileOrText;
+  if (typeof fileOrText !== "string" || !fileOrText) throw new Error("checkpoint requires a record file path or text");
+  return fs.readFileSync(fileOrText, "utf8");
+}
+export function createRecordId(used = new Set()) {
+  const occupied = new Set([...used].filter((id) => ID.test(id)));
+  if (occupied.size >= ID_SPACE) throw new Error("No R- record IDs remain");
+  const start = crypto.randomInt(ID_SPACE);
+  for (let offset = 0; offset < ID_SPACE; offset += 1) {
+    const candidate = `R-${((start + offset) % ID_SPACE).toString(36).padStart(3, "0")}`;
+    if (!occupied.has(candidate)) return candidate;
+  }
+  throw new Error("No R- record IDs remain");
+}
+export function checkpoint(root, fileOrText, { isText = false } = {}) {
+  root = path.resolve(root); const source = readInput(fileOrText, isText);
+  assertWorkspaceLayout(root);
+  return withWorkspaceWriteLock(root, () => {
+    const { records: recordsDir, research: researchPath } = locations(root);
+    const records = listRecords(root); const input = parseRecord(source, { input: true });
+    const body = input.body; delete input.body;
+    const research = fs.readFileSync(researchPath, "utf8"); const current = parseFrontier(research);
+    const knownFrontier = historicalFrontier(records); for (const node of current) knownFrontier.add(node.id);
+    const knownRecords = new Set(records.map((record) => record.id));
+    const knownObjects = new Set([...knownFrontier, ...knownRecords]);
+    for (const relation of input.relations) {
+      if (!knownObjects.has(relation.target)) throw new Error(`record relation ${relation.type} references unknown object ${relation.target}`);
+      if (relation.type === "rsh:about" && !isFrontierId(relation.target)) throw new Error("rsh:about must target a Q- or D- object");
+      if ((relation.type === "rsh:depends_on" || relation.type === "rsh:derived_from") && !ID.test(relation.target)) throw new Error(`${relation.type} must target an R- object`);
+    }
+    if (input.assertion) {
+      if (!knownObjects.has(input.assertion.subject)) throw new Error(`record assertion references unknown subject ${input.assertion.subject}`);
+      if (!knownObjects.has(input.assertion.object)) throw new Error(`record assertion references unknown object ${input.assertion.object}`);
+    }
+    const { nodes, persisted } = applyActions(input.frontier, current, records, knownFrontier);
+    const relationKeys = new Set(input.relations.map((relation) => `${relation.type}\0${relation.target}`));
+    for (const action of persisted) {
+      if (action.action !== "open") continue;
+      const key = `rsh:about\0${action.id}`;
+      if (relationKeys.has(key)) continue;
+      input.relations.push({ type: "rsh:about", target: action.id });
+      relationKeys.add(key);
+    }
+    const id = createRecordId(knownRecords);
+    const latestCreatedAt = records.reduce((latest, record) => Math.max(latest, Date.parse(record.created_at)), 0);
+    const createdAt = new Date(Math.max(Date.now(), latestCreatedAt + 1)).toISOString();
+    const record = { ...input, id, created_at: createdAt, frontier: persisted, body };
+    const recordPath = path.join(recordsDir, `${id}.md`); const updatedResearch = replaceOpenSection(research, nodes);
+    if (typeof fsCore.commitFileBatch !== "function") throw new Error("fs.commitFileBatch is unavailable");
+    fsCore.commitFileBatch([{ target: recordPath, contents: serializeRecord(record) }, { target: researchPath, contents: updatedResearch }]);
+    return { id: record.id, kind: record.kind, state: record.state, frontier_actions: persisted };
+  });
+}
+export function markRecord(root, id, state) {
+  root = path.resolve(root);
+  if (!STATES.has(state)) throw new Error("record.state is invalid");
+  assertWorkspaceLayout(root);
+  return withWorkspaceWriteLock(root, () => {
+    const file = path.join(locations(root).records, `${id}.md`);
+    if (!ID.test(id ?? "") || !fs.existsSync(file)) throw new Error(`Record ${id} does not exist`);
+    const record = readRecordFile(file); record.state = state;
+    if (typeof fsCore.commitFileBatch !== "function") throw new Error("fs.commitFileBatch is unavailable");
+    fsCore.commitFileBatch([{ target: file, contents: serializeRecord(record) }]); return { id: record.id, state: record.state };
+  });
+}
+export const mark = markRecord;
+export const parse = parseRecord;
+export const serialize = serializeRecord;
+export const list = listRecords;
+export const get = getRecord;

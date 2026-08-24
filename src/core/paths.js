@@ -17,7 +17,7 @@ export function findGitRoot(start = process.cwd()) {
 export function findWorkspaceRoot(start = process.cwd()) {
   let current = path.resolve(start);
   while (true) {
-    if (fs.existsSync(path.join(current, ".rsh", "workspace.json"))) return current;
+    if (fs.lstatSync(path.join(current, ".rsh"), { throwIfNoEntry: false })) return current;
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
@@ -34,20 +34,25 @@ export function workspacePaths(root) {
   const rsh = path.join(root, ".rsh");
   return {
     root,
+    research: path.join(root, "RESEARCH.md"),
     rsh,
-    workspace: path.join(rsh, "workspace.json"),
-    findings: path.join(rsh, "findings"),
-    facts: path.join(rsh, "facts"),
-    graph: path.join(rsh, "graph"),
-    edges: path.join(rsh, "graph", "edges.jsonl"),
-    evidence: path.join(rsh, "evidence"),
-    traces: path.join(rsh, "traces"),
-    events: path.join(rsh, "events.jsonl"),
-    verifications: path.join(rsh, "verifications.jsonl"),
-    revocations: path.join(rsh, "revocations.jsonl"),
-    cache: path.join(rsh, "cache"),
-    index: path.join(rsh, "cache", "index.json"),
-    embeddings: path.join(rsh, "cache", "embeddings.json"),
-    examples: path.join(rsh, "examples")
+    records: path.join(rsh, "records"),
+    locks: path.join(rsh, "locks")
   };
+}
+
+function requireManagedPath(file, kind, label) {
+  const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (!stat || stat.isSymbolicLink() || (kind === "file" ? !stat.isFile() : !stat.isDirectory())) {
+    throw new Error(`Invalid RSH workspace: ${label} must be a real ${kind}`);
+  }
+}
+
+export function assertWorkspaceLayout(root) {
+  const paths = workspacePaths(path.resolve(root));
+  requireManagedPath(paths.rsh, "directory", ".rsh");
+  requireManagedPath(paths.research, "file", "RESEARCH.md");
+  requireManagedPath(paths.records, "directory", ".rsh/records");
+  requireManagedPath(paths.locks, "directory", ".rsh/locks");
+  return paths;
 }

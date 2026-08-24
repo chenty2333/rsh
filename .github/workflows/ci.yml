@@ -31,8 +31,9 @@ jobs:
           cd "$TMP"
           git init -q
           npm install "$GITHUB_WORKSPACE/$PKG" --silent
-          ./node_modules/.bin/rsh init --name ci-workspace
-          ./node_modules/.bin/rsh seed gabidulin
-          ./node_modules/.bin/rsh index
-          ./node_modules/.bin/rsh check --ir .rsh/examples/blocked-route.json --json
+          ./node_modules/.bin/rsh init
+          printf '%s\n' '+++' 'kind = "result"' 'state = "unchecked"' '+++' '' '# CI result' '' 'The packaged checkpoint path works.' | ./node_modules/.bin/rsh checkpoint -
+          ./node_modules/.bin/rsh resume
+          ./node_modules/.bin/rsh find 'CI result'
+          ./node_modules/.bin/rsh status
           ./node_modules/.bin/rsh doctor
