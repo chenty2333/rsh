@@ -26,7 +26,8 @@ rsh resume
 
 Initialization creates `RESEARCH.md` and matching resume/checkpoint skills under
 `.agents/skills/` and `.claude/skills/`. `.rsh/records/` is the record store;
-`.rsh/locks/` is only for local write locking.
+`.rsh/sequence.toml` is the durable ID high-water mark, while `.rsh/locks/` and
+the three-operation `.rsh/trash/` undo buffer are local-only.
 
 ## Research frontier
 
@@ -35,13 +36,15 @@ Initialization creates `RESEARCH.md` and matching resume/checkpoint skills under
 ```markdown
 ## Open
 
-- [Q-a13] Prove the degenerate upper bound
-  - [D-4z1] Try a direct spectral estimate
+- [Q-00000] Prove the degenerate upper bound
+  - [D-00001] Try a direct spectral estimate
 ```
 
-`Q-` identifies a question, `D-` a direction, and `R-` a Record. Every ID has
-exactly three lowercase base36 characters (`0-9a-z`). Only open frontier items
-appear here; Git and stored frontier actions preserve history.
+`Q-` identifies a question, `D-` a direction, and `R-` a Record. New IDs use
+five lowercase base36 digits (`0-9a-z`) allocated from one monotonically
+increasing workspace-wide sequence. Legacy three-digit IDs remain readable.
+Only open frontier items appear here; Git and stored frontier actions preserve
+history.
 
 ## Checkpoints and Records
 
@@ -54,24 +57,24 @@ state = "unchecked"
 
 [[relations]]
 type = "rsh:about"
-target = "D-4z1"
+target = "D-00001"
 
 [[relations]]
 type = "rsh:depends_on"
-target = "R-a9z"
+target = "R-00002"
 
 [[relations]]
 type = "rsh:derived_from"
-target = "R-b2c"
+target = "R-00003"
 
 [assertion]
-subject = "R-a9z"
+subject = "R-00002"
 predicate = "math:generalizes"
-object = "R-b2c"
+object = "R-00003"
 
 [[frontier]]
 action = "close"
-id = "D-4z1"
+id = "D-00001"
 outcome = "resolved"
 +++
 
@@ -83,7 +86,7 @@ State one main conclusion completely.
 
 ## Argument
 
-Give the evidence or proof, citing `R-a9z` where it is actually used.
+Give the evidence or proof, citing `R-00002` where it is actually used.
 
 ## Scope
 
@@ -95,7 +98,7 @@ Optionally explain how to apply the conclusion elsewhere.
 ```
 
 Apply it with `rsh checkpoint note.md`. RSH validates the record and frontier
-transaction before publishing it under a generated `R-xxx` ID.
+transaction before publishing it under a generated five-digit Record ID.
 Each successful frontier `open` action also stores an automatic `rsh:about`
 relation from that Record to the newly generated Q/D item, so the originating
 Record appears immediately in the new item's resume summary.
@@ -143,14 +146,16 @@ rsh find QUERY [--regex] [--kind KIND] [--state STATE] [--limit N]
 rsh checkpoint FILE.md
 rsh replace RECORD_ID FILE.md
 rsh get ID
+rsh delete RECORD_ID [--dry-run]
+rsh undo [--dry-run]
 rsh mark RECORD_ID unchecked|checked|withdrawn
 rsh status
 rsh doctor
 rsh mcp
 ```
 
-`rsh replace R-a9z FILE.md` atomically creates a corrected successor, adds
-`rsh:supersedes` pointing to `R-a9z`, and withdraws `R-a9z`.
+`rsh replace R-00002 FILE.md` atomically creates a corrected successor, adds
+`rsh:supersedes` pointing to `R-00002`, and withdraws `R-00002`.
 The successor inherits the predecessor's `rsh:about` relations. If the old body
 contains a prohibited control character, replacement renders it visibly as a
 literal `\\uXXXX` token while preserving the old Record as withdrawn history.
@@ -158,26 +163,45 @@ To merge several incomplete Records, add `rsh:supersedes` relations for the
 additional predecessors to the replacement input; all predecessors are
 withdrawn in the same transaction.
 `rsh resume` groups Records through `rsh:about`, prefers the latest active replacement,
-and flags withdrawn dependencies. `rsh get R-xxx` prints the raw Record followed
+and flags withdrawn dependencies. `rsh get R-00002` prints the raw Record followed
 by replacement history, derived backlinks, and dependency reminders. `rsh find
 <ID>` uses `rg` to find relations, assertion endpoints, and Markdown references.
 Other searches are fixed-string smart-case unless `--regex` is supplied; kind,
 state, and limit filters still apply. Compact results prefer active replacement
 heads; withdrawn versions remain available explicitly. There is no index or cache.
 
+`rsh delete R-00002 --dry-run` previews the complete deletion set without
+changing the undo stack, including the frontier before/after projection when it
+would change. Without `--dry-run`, `delete` atomically moves the
+target and every current-workspace Record that references anything being
+deleted through a relation, assertion, or exact ID in its Markdown body into
+`.rsh/trash`. Deleting a Record that opened a Q/D also removes that frontier
+object, its descendants, lifecycle, and reverse references. Deleting a Record
+that only revised, closed, or reopened an item preserves the item, removes later
+dependent lifecycle events, and replays the preceding frontier state. The latest
+three delete operations are retained; a fourth prunes
+the oldest. `rsh undo --dry-run` previews restoration, while `rsh undo` restores
+the latest deletion in LIFO order and refuses to overwrite conflicting current
+files. The workspace sequence keeps a high-water mark, so deleted IDs are never
+reused. Local trash is a short undo facility, not recovery of Git history or
+copies in other workspaces, exported documents, transcripts, or logs.
+Interrupted delete/undo journals are recovered by the next real delete or undo;
+dry-runs stay read-only and ask for that recovery instead of changing state.
+
 ## MCP
 
 The MCP server exposes `rsh_resume`, `rsh_find`, `rsh_get`, `rsh_checkpoint`,
-`rsh_replace`, `rsh_mark`, `rsh_status`, and `rsh_doctor`, plus `rsh://state` and
-`rsh://record/{id}`. `rsh_checkpoint` accepts structured fields rather than a
-TOML document string:
+`rsh_replace`, `rsh_delete`, `rsh_undo`, `rsh_mark`, `rsh_status`, and
+`rsh_doctor`, plus `rsh://state` and `rsh://record/{id}`. `rsh_delete` takes a
+`record_id` and optional `dry_run`; `rsh_undo` takes optional `dry_run`.
+`rsh_checkpoint` accepts structured fields rather than a TOML document string:
 
 ```json
 {
   "kind": "result",
   "body": "# Conclusion\n\nA complete conclusion.\n",
   "relations": [
-    { "type": "rsh:depends_on", "target": "R-a9z" }
+    { "type": "rsh:depends_on", "target": "R-00002" }
   ],
   "frontier": [
     { "action": "open", "kind": "question", "text": "What remains open?" }

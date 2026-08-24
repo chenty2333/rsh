@@ -37,7 +37,9 @@ export function workspacePaths(root) {
     research: path.join(root, "RESEARCH.md"),
     rsh,
     records: path.join(rsh, "records"),
-    locks: path.join(rsh, "locks")
+    locks: path.join(rsh, "locks"),
+    trash: path.join(rsh, "trash"),
+    sequence: path.join(rsh, "sequence.toml")
   };
 }
 

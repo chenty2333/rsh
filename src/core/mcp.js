@@ -7,15 +7,17 @@ import { z } from "zod";
 import { findRecords, formatFindMarkdown, formatStatusMarkdown, getItem, resumeResearch, statusWorkspace } from "./query.js";
 import { checkpoint, markRecord, replaceRecord, serializeCheckpointDocument } from "./record.js";
 import { doctor, formatDoctorMarkdown } from "./doctor.js";
+import { deleteRecord, undoDelete } from "./delete.js";
+import { FRONTIER_ID_PATTERN, ITEM_ID_PATTERN, RECORD_ID_PATTERN } from "./ids.js";
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require("../../package.json");
-const ID = z.string().regex(/^[QDR]-[0-9a-z]{3}$/,
-  "id must be Q-, D-, or R- followed by exactly 3 lowercase base36 characters");
-const RECORD_ID = z.string().regex(/^R-[0-9a-z]{3}$/,
-  "record id must be R- followed by exactly 3 lowercase base36 characters");
-const FRONTIER_ID = z.string().regex(/^[QD]-[0-9a-z]{3}$/,
-  "frontier id must be Q- or D- followed by exactly 3 lowercase base36 characters");
+const ID = z.string().regex(ITEM_ID_PATTERN,
+  "id must be Q-, D-, or R- followed by exactly 3 or 5 lowercase base36 characters");
+const RECORD_ID = z.string().regex(RECORD_ID_PATTERN,
+  "record id must be R- followed by exactly 3 or 5 lowercase base36 characters");
+const FRONTIER_ID = z.string().regex(FRONTIER_ID_PATTERN,
+  "frontier id must be Q- or D- followed by exactly 3 or 5 lowercase base36 characters");
 const PREDICATE = z.string().regex(/^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$/,
   "relation type must use lowercase namespace:predicate_name format");
 function nonEmptyString(description) {
@@ -70,6 +72,13 @@ const TOOLS = {
     record_id: RECORD_ID.describe("Existing Record to replace."),
     state: z.enum(["unchecked", "checked"]).optional().describe("Local workflow state for the active successor; defaults to unchecked.")
   }).strict() },
+  rsh_delete: { description: "Delete a Record and its complete local reference closure atomically. Use dry_run to inspect the deletion set without changing the workspace.", inputSchema: {
+    record_id: RECORD_ID.describe("Existing Record at the root of the deletion closure."),
+    dry_run: z.boolean().optional().describe("When true, return the deletion plan without modifying the workspace.")
+  } },
+  rsh_undo: { description: "Undo the most recent RSH deletion and restore its Records atomically. Use dry_run to inspect the restore set.", inputSchema: {
+    dry_run: z.boolean().optional().describe("When true, return the restore plan without modifying the workspace.")
+  } },
   rsh_mark: { description: "Set the state of an existing research record.", inputSchema: { record_id: RECORD_ID, state: z.enum(["unchecked", "checked", "withdrawn"]) } },
   rsh_status: { description: "Show the current RSH workspace status.", inputSchema: {} },
   rsh_doctor: { description: "Audit the RSH workspace and report actionable findings.", inputSchema: {} }
@@ -126,7 +135,7 @@ function links(id) {
 }
 
 function recordLinks(ids) {
-  return [...new Set(ids.filter((id) => /^R-[0-9a-z]{3}$/.test(id)))].flatMap((id) => links(id));
+  return [...new Set(ids.filter((id) => RECORD_ID_PATTERN.test(id)))].flatMap((id) => links(id));
 }
 
 function response(text, result, extra = []) {
@@ -157,6 +166,17 @@ async function callTool(root, name, args) {
       const replacedIds = result.replaced_ids ?? [result.replaced_id];
       const text = `${writeMarkdown("Record replaced", newId)}\n- **Replaced:** ${replacedIds.join(", ")}${verification ? `\n${verification}` : ""}`;
       return response(text, result, recordLinks([...replacedIds, result.id]));
+    }
+    case "rsh_delete": {
+      const result = portable(await deleteRecord(root, args.record_id, { dryRun: Boolean(args.dry_run) }), root);
+      const ids = result.deleted_ids ?? result.would_delete_ids ?? result.record_ids ?? result.ids ?? [args.record_id];
+      const heading = args.dry_run ? "Deletion preview" : "Records deleted";
+      return response(markdown(result, heading), result, args.dry_run ? recordLinks(ids) : []);
+    }
+    case "rsh_undo": {
+      const result = portable(await undoDelete(root, { dryRun: Boolean(args.dry_run) }), root);
+      const ids = result.restored_ids ?? result.would_restore_ids ?? result.record_ids ?? result.ids ?? [];
+      return response(markdown(result, args.dry_run ? "Undo preview" : "Deletion undone"), result, args.dry_run ? [] : recordLinks(ids));
     }
     case "rsh_mark": { const result = portable(await markRecord(root, args.record_id, args.state), root); const id = resultId(result, args.record_id); return response(writeMarkdown("Record state updated", id, args.state), result, links(id)); }
     case "rsh_status": { const result = portable(await statusWorkspace(root), root); return response(formatStatusMarkdown(result), result); }

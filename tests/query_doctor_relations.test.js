@@ -66,11 +66,11 @@ test("get reports missing depends_on targets from an externally damaged workspac
   const root = tempWorkspace("query-missing-dependency");
   const { conclusion } = seedRelations(root);
   const file = path.join(root, ".rsh", "records", `${conclusion.id}.md`);
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/target = "R-[0-9a-z]{3}"/, 'target = "R-zzz"'));
-  assert.match(getItem(root, conclusion.id), /R-zzz: \*\*MISSING\*\*/);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace(/target = "R-(?:[0-9a-z]{3}|[0-9a-z]{5})"/, 'target = "R-zzzzz"'));
+  assert.match(getItem(root, conclusion.id), /R-zzzzz: \*\*MISSING\*\*/);
   const report = doctor(root);
   assert.equal(report.ok, false);
-  assert.match(report.errors.map((error) => error.detail).join("\n"), /references missing record R-zzz/);
+  assert.match(report.errors.map((error) => error.detail).join("\n"), /references missing record R-zzzzz/);
 });
 
 test("doctor rejects legacy fields, malformed relations, duplicate relations, and empty bodies", () => {
@@ -108,7 +108,7 @@ test("doctor rejects tampered frontier history and legacy workspace entries", ()
   report = doctor(root);
   assert.equal(report.ok, false);
   assert.match(report.errors.map((error) => error.detail).join("\n"), /unexpected legacy or unmanaged entries: workspace.json/);
-  assert.match(question, /^Q-[0-9a-z]{3}$/);
+  assert.match(question, /^Q-[0-9a-z]{5}$/);
 });
 
 test("doctor rejects close and revise actions whose open history is missing", () => {

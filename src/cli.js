@@ -4,27 +4,29 @@ import { initializeWorkspace } from "./core/workspace.js";
 import { requireWorkspace } from "./core/paths.js";
 import { resumeResearch, findRecords, getItem, statusWorkspace, formatStatusMarkdown, formatFindMarkdown } from "./core/query.js";
 import { checkpoint, markRecord, replaceRecord } from "./core/record.js";
+import { deleteRecord, undoDelete } from "./core/delete.js";
+import { ITEM_ID_PATTERN, RECORD_ID_PATTERN } from "./core/ids.js";
 import { doctor, formatDoctorMarkdown } from "./core/doctor.js";
 import { runMcp } from "./core/mcp.js";
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require("../package.json");
 
-const COMMANDS = new Set(["init", "resume", "find", "checkpoint", "replace", "get", "mark", "status", "doctor", "mcp", "help", "version"]);
-const BOOLEAN_FLAGS = new Set(["all", "regex", "help", "version"]);
+const COMMANDS = new Set(["init", "resume", "find", "checkpoint", "replace", "delete", "undo", "get", "mark", "status", "doctor", "mcp", "help", "version"]);
+const BOOLEAN_FLAGS = new Set(["all", "regex", "dry-run", "help", "version"]);
 const VALUE_FLAGS = new Set(["kind", "state", "limit"]);
 const GLOBAL_FLAGS = new Set(["help", "version"]);
 const FLAGS = {
   init: new Set(), resume: new Set(["all"]),
   find: new Set(["regex", "kind", "state", "limit"]),
-  checkpoint: new Set(), replace: new Set(), get: new Set(), mark: new Set(), status: new Set(),
+  checkpoint: new Set(), replace: new Set(), delete: new Set(["dry-run"]), undo: new Set(["dry-run"]), get: new Set(), mark: new Set(), status: new Set(),
   doctor: new Set(), mcp: new Set(), help: new Set(), version: new Set()
 };
-const POSITIONALS = { init: 0, resume: 0, checkpoint: 1, replace: 2, get: 1, mark: 2, status: 0, doctor: 0, mcp: 0, help: 0, version: 0 };
+const POSITIONALS = { init: 0, resume: 0, checkpoint: 1, replace: 2, delete: 1, undo: 0, get: 1, mark: 2, status: 0, doctor: 0, mcp: 0, help: 0, version: 0 };
 const KINDS = new Set(["result", "dead_end", "experience"]);
 const STATES = new Set(["unchecked", "checked", "withdrawn"]);
-const ITEM_ID = /^[QDR]-[0-9a-z]{3}$/;
-const RECORD_ID = /^R-[0-9a-z]{3}$/;
+const ITEM_ID = ITEM_ID_PATTERN;
+const RECORD_ID = RECORD_ID_PATTERN;
 
 function parseArgs(argv) {
   const positional = [];
@@ -66,8 +68,8 @@ function validate(command, positional, flags) {
   if (flags.kind && !KINDS.has(flags.kind)) throw new Error("Flag --kind must be result, dead_end, or experience");
   if (flags.state && !STATES.has(flags.state)) throw new Error("Flag --state must be unchecked, checked, or withdrawn");
   if (flags.limit && !/^[1-9]\d*$/.test(flags.limit)) throw new Error("Flag --limit must be a positive integer");
-  if (command === "get" && !ITEM_ID.test(positional[0])) throw new Error("ID must be Q-, D-, or R- followed by exactly 3 lowercase base36 characters");
-  if ((command === "mark" || command === "replace") && !RECORD_ID.test(positional[0])) throw new Error("Record ID must be R- followed by exactly 3 lowercase base36 characters");
+  if (command === "get" && !ITEM_ID.test(positional[0])) throw new Error("ID must be Q-, D-, or R- followed by exactly 3 or 5 lowercase base36 characters");
+  if ((command === "mark" || command === "replace" || command === "delete") && !RECORD_ID.test(positional[0])) throw new Error("Record ID must be R- followed by exactly 3 or 5 lowercase base36 characters");
   if (command === "mark" && !STATES.has(positional[1])) throw new Error("Mark state must be unchecked, checked, or withdrawn");
 }
 
@@ -81,8 +83,10 @@ Usage:
                  [--state unchecked|checked|withdrawn] [--limit N]
   rsh checkpoint FILE.md       (use - to read stdin)
   rsh replace RECORD_ID FILE.md  (use - to read stdin)
-  rsh get ID                    (Q-abc, D-4z1, or R-a9z)
-  rsh mark RECORD_ID unchecked|checked|withdrawn  (for example R-a9z)
+  rsh delete RECORD_ID [--dry-run]
+  rsh undo [--dry-run]
+  rsh get ID                    (Q-00000, D-00001, or R-00002; legacy 3-digit IDs also work)
+  rsh mark RECORD_ID unchecked|checked|withdrawn  (for example R-00002)
   rsh status
   rsh doctor
   rsh mcp
@@ -148,6 +152,8 @@ export async function main(argv) {
     print(replaceRecord(root, positional[0], input, { isText: fromStdin }));
     return;
   }
+  if (command === "delete") { print(deleteRecord(root, positional[0], { dryRun: Boolean(flags["dry-run"]) })); return; }
+  if (command === "undo") { print(undoDelete(root, { dryRun: Boolean(flags["dry-run"]) })); return; }
   if (command === "get") { print(getItem(root, positional[0])); return; }
   if (command === "mark") { print(markRecord(root, positional[0], positional[1])); return; }
   if (command === "status") { print(statusWorkspace(root), formatStatusMarkdown); return; }

@@ -4,8 +4,11 @@ import { workspacePaths } from "./paths.js";
 import { checkRipgrep, generatedSkillFiles } from "./workspace.js";
 import { parseFrontier } from "./frontier.js";
 import { parseRecord } from "./record.js";
+import { ITEM_ID_PATTERN } from "./ids.js";
+import { inspectSequence } from "./sequence.js";
+import { inspectTrash } from "./delete.js";
 
-const ITEM_ID = /^[QDR]-[0-9a-z]{3}$/;
+const ITEM_ID = ITEM_ID_PATTERN;
 const RELATION_TYPE = /^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$/;
 
 function isDirectory(file) {
@@ -135,9 +138,9 @@ export function doctor(root) {
   add("RSH directory", isDirectory(paths.rsh), ".rsh");
   try {
     if (!isDirectory(paths.rsh)) throw new Error(".rsh is missing");
-    const unexpected = fs.readdirSync(paths.rsh).filter((name) => name !== "locks" && name !== "records");
+    const unexpected = fs.readdirSync(paths.rsh).filter((name) => !["locks", "records", "sequence.toml", "trash"].includes(name));
     if (unexpected.length) throw new Error(`unexpected legacy or unmanaged entries: ${unexpected.sort().join(", ")}`);
-    add("RSH directory entries", true, "locks and records only");
+    add("RSH directory entries", true, "managed entries only");
   } catch (error) { add("RSH directory entries", false, error.message); }
 
   let frontier = [];
@@ -149,6 +152,13 @@ export function doctor(root) {
 
   add("records directory", isDirectory(paths.records), ".rsh/records");
   add("locks directory", isDirectory(paths.locks), ".rsh/locks");
+  if (fs.existsSync(paths.trash)) {
+    try {
+      if (!isDirectory(paths.trash)) throw new Error(".rsh/trash must be a real directory");
+      const trash = inspectTrash(root);
+      add("trash directory", true, `${trash.operations} recoverable delete operation(s)`);
+    } catch (error) { add("trash directory", false, error.message); }
+  } else add("trash directory", false, ".rsh/trash will be created on the next delete", "warning");
 
   let records = [];
   let recordsValid = false;
@@ -192,6 +202,15 @@ export function doctor(root) {
     validateHistory(records, frontier);
     add("record references", true, "relations, assertions, replacement chains, and frontier snapshots resolve");
   } catch (error) { add("record references", false, error.message); }
+
+  try {
+    const ids = new Set(records.map((record) => record.id));
+    for (const node of frontier) ids.add(node.id);
+    for (const record of records) for (const action of record.frontier) ids.add(action.id);
+    const sequence = inspectSequence(root, ids);
+    if (sequence.exists) add("ID sequence", true, `next = ${sequence.next}`);
+    else add("ID sequence", false, "legacy workspace; sequence.toml will be created on the next write", "warning");
+  } catch (error) { add("ID sequence", false, error.message); }
 
   for (const { target, contents } of generatedSkillFiles(root)) {
     const relative = path.relative(root, target).split(path.sep).join("/");

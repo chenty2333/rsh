@@ -2,16 +2,18 @@
 
 ## IDs and frontier
 
-Question, direction, and Record IDs use `Q-`, `D-`, and `R-` followed by
-exactly three lowercase base36 characters (`[0-9a-z]{3}`). Generators avoid IDs
-used by current or historical workspace objects.
+New question, direction, and Record IDs use `Q-`, `D-`, and `R-` followed by
+five lowercase base36 digits (`[0-9a-z]{5}`). All three kinds share one
+workspace-global, monotonically increasing sequence. Its persisted high-water
+mark prevents reuse after deletion. Legacy three-digit IDs remain readable and
+may still be referenced.
 
 `RESEARCH.md` contains exactly one `## Open` section. Managed entries use two
 spaces per tree level:
 
 ```markdown
-- [Q-a13] An open question
-  - [D-4z1] A possible direction
+- [Q-00000] An open question
+  - [D-00001] A possible direction
 ```
 
 Only open entries occur there. Closing a parent requires every open child to be
@@ -44,7 +46,7 @@ Each outbound relation is an array-of-tables entry:
 ```toml
 [[relations]]
 type = "rsh:depends_on"
-target = "R-a9z"
+target = "R-00002"
 ```
 
 Relation types match a lowercase namespace form such as
@@ -73,15 +75,31 @@ contains prohibited control characters, replacement renders them as visible
 literal `\\uXXXX` tokens so both versions remain parseable. Readers prefer the
 latest active chain head by default.
 
+Deleting a Record computes the transitive current-workspace reverse-reference
+closure: any Record whose relation, assertion endpoint, or exact Markdown-body
+ID references an item being deleted is included. Dry-run computes the same
+closure without changing the undo stack. A real deletion moves the closure into
+an operation snapshot under `.rsh/trash`; only the latest three snapshots are
+retained. Undo restores the newest snapshot in LIFO order and refuses conflicts
+with current files. The ID sequence high-water mark survives delete and undo.
+Local trash is not Git or external-history recovery.
+
+Frontier effects follow action history. Removing an `open` action removes that
+Q/D object, its current or historical descendants, its lifecycle, and reverse
+references. Removing only a `revise`, `close`, or `reopen` action preserves the
+object, removes later events that depend on that action, and replays the retained
+history. Interrupted delete/undo journals recover on the next real delete or
+undo; dry-run never performs recovery writes.
+
 ## Relational assertions
 
 When a result's main conclusion is a relation, it may include one projection:
 
 ```toml
 [assertion]
-subject = "R-b2c"
+subject = "R-00003"
 predicate = "math:generalizes"
-object = "R-c3d"
+object = "R-00004"
 ```
 
 Subject and object resolve to a current or historical local `Q-`, `D-`, or `R-`;

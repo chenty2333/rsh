@@ -1,25 +1,15 @@
-import crypto from "node:crypto";
+import { FRONTIER_ID_PATTERN, formatGeneratedId, nextGeneratedOrdinal } from "./ids.js";
 
-const ID_SPACE = 36 ** 3;
-const FRONTIER_ID = /^[QD]-[0-9a-z]{3}$/;
-const ENTRY = /^( *)(- )\[([QD]-[0-9a-z]{3})\] (.*)$/;
+const ENTRY = /^( *)(- )\[([QD]-(?:[0-9a-z]{3}|[0-9a-z]{5}))\] (.*)$/;
 
 export function isFrontierId(value) {
-  return typeof value === "string" && FRONTIER_ID.test(value);
+  return typeof value === "string" && FRONTIER_ID_PATTERN.test(value);
 }
 
 export function createFrontierId(kind = "Q", used = new Set()) {
   const prefix = kind === "question" ? "Q" : kind === "direction" ? "D" : kind;
   if (prefix !== "Q" && prefix !== "D") throw new Error("frontier kind must be question or direction");
-  const occupied = new Set([...used].filter((id) => id.startsWith(`${prefix}-`)));
-  if (occupied.size >= ID_SPACE) throw new Error(`No ${prefix}- frontier IDs remain`);
-  const start = crypto.randomInt(ID_SPACE);
-  for (let offset = 0; offset < ID_SPACE; offset += 1) {
-    const suffix = ((start + offset) % ID_SPACE).toString(36).padStart(3, "0");
-    const id = `${prefix}-${suffix}`;
-    if (!occupied.has(id)) return id;
-  }
-  throw new Error(`No ${prefix}- frontier IDs remain`);
+  return formatGeneratedId(prefix, nextGeneratedOrdinal(used));
 }
 
 function openBounds(markdown) {

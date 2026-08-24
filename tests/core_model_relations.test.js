@@ -17,10 +17,11 @@ const workspace = () => {
 };
 const input = (extra = {}) => ({ kind: "result", frontier: [], ...extra });
 
-test("Q, D, and R generators use exactly three lowercase base36 characters", () => {
-  assert.match(createFrontierId("question"), /^Q-[0-9a-z]{3}$/);
-  assert.match(createFrontierId("direction"), /^D-[0-9a-z]{3}$/);
-  assert.match(createRecordId(), /^R-[0-9a-z]{3}$/);
+test("Q, D, and R generators use exactly five lowercase base36 characters, while readers accept legacy IDs", () => {
+  assert.match(createFrontierId("question"), /^Q-[0-9a-z]{5}$/);
+  assert.match(createFrontierId("direction"), /^D-[0-9a-z]{5}$/);
+  assert.match(createRecordId(), /^R-[0-9a-z]{5}$/);
+  assert.equal(parseRecord(document({ id: "R-abc", created_at: "2026-08-25T00:00:00.000Z", state: "unchecked", kind: "result", retry_if: [], relations: [], frontier: [] })).id, "R-abc");
   for (const invalid of ["Q-1234", "D-ABC", "R-ab-"]) {
     assert.throws(() => invalid[0] === "R"
       ? parseRecord(document({ id: invalid, created_at: "2026-08-25T00:00:00.000Z", state: "unchecked", kind: "result", retry_if: [], relations: [], frontier: [] }))
@@ -28,20 +29,9 @@ test("Q, D, and R generators use exactly three lowercase base36 characters", () 
   }
 });
 
-test("ID generators avoid occupied IDs and report complete base36 exhaustion", () => {
-  const allQ = new Set();
-  const allR = new Set();
-  for (let index = 0; index < 36 ** 3; index += 1) {
-    const suffix = index.toString(36).padStart(3, "0");
-    allQ.add(`Q-${suffix}`);
-    allR.add(`R-${suffix}`);
-  }
-  assert.throws(() => createFrontierId("question", allQ), /No Q- frontier IDs remain/);
-  assert.throws(() => createRecordId(allR), /No R- record IDs remain/);
-  allQ.delete("Q-abc");
-  allR.delete("R-4z1");
-  assert.equal(createFrontierId("question", allQ), "Q-abc");
-  assert.equal(createRecordId(allR), "R-4z1");
+test("standalone generators take their high water mark from generated five-character IDs", () => {
+  assert.equal(createFrontierId("question", new Set(["Q-00000", "R-00001", "D-00002"])), "Q-00003");
+  assert.equal(createRecordId(new Set(["Q-0000z", "R-abc"])), "R-00010");
 });
 
 test("relations and a result assertion round-trip with Unicode, LaTeX, and Markdown", () => {

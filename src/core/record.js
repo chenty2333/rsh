@@ -6,10 +6,11 @@ import * as fsCore from "./fs.js";
 import { assertWorkspaceLayout, workspacePaths } from "./paths.js";
 import { withWorkspaceWriteLock } from "./write-lock.js";
 import { createFrontierId, isFrontierId, parseFrontier, replaceOpenSection } from "./frontier.js";
+import { formatGeneratedId, ITEM_ID_PATTERN, nextGeneratedOrdinal, RECORD_ID_PATTERN } from "./ids.js";
+import { createIdAllocator } from "./sequence.js";
 
-const ID_SPACE = 36 ** 3;
-const ID = /^R-[0-9a-z]{3}$/;
-const OBJECT_ID = /^[QDR]-[0-9a-z]{3}$/;
+const ID = RECORD_ID_PATTERN;
+const OBJECT_ID = ITEM_ID_PATTERN;
 const PREDICATE = /^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$/;
 const KINDS = new Set(["result", "dead_end", "experience"]);
 const STATES = new Set(["unchecked", "checked", "withdrawn"]);
@@ -190,7 +191,7 @@ export function listRecords(root, options = {}) {
   assertWorkspaceLayout(root);
   const { records } = locations(root);
   return fs.readdirSync(records).map((name) => {
-    if (!/^R-[0-9a-z]{3}\.md$/.test(name)) throw new Error(`Invalid RSH record filename ${name}`);
+    if (!/^R-(?:[0-9a-z]{3}|[0-9a-z]{5})\.md$/.test(name)) throw new Error(`Invalid RSH record filename ${name}`);
     const record = readRecordFile(path.join(records, name), options);
     if (`${record.id}.md` !== name) throw new Error(`Record filename ${name} does not match stored ID ${record.id}`);
     return record;
@@ -223,14 +224,14 @@ function setParent(nodes, id, parent) {
     cursor = nodes.find((node) => node.id === cursor)?.parent ?? null;
   }
 }
-function applyActions(rawActions, initialNodes, records, knownFrontier) {
+function applyActions(rawActions, initialNodes, records, knownFrontier, allocateFrontierId = (kind) => createFrontierId(kind, knownFrontier)) {
   const nodes = initialNodes.map(({ id, kind, text, parent }) => ({ id, kind, text, parent }));
   const persisted = [];
   for (let index = 0; index < rawActions.length; index += 1) {
     const action = rawActions[index];
     if (action.action === "open") {
       const parent = action.parent || null; setParent(nodes, "__new__", parent);
-      const id = createFrontierId(action.kind, knownFrontier);
+      const id = allocateFrontierId(action.kind);
       knownFrontier.add(id);
       const node = { id, kind: action.kind, text: action.text, parent };
       nodes.push(node); persisted.push({ action: "open", id, after: snapshot(node) }); continue;
@@ -266,14 +267,7 @@ function readInput(fileOrText, isText) {
   return fs.readFileSync(fileOrText, "utf8");
 }
 export function createRecordId(used = new Set()) {
-  const occupied = new Set([...used].filter((id) => ID.test(id)));
-  if (occupied.size >= ID_SPACE) throw new Error("No R- record IDs remain");
-  const start = crypto.randomInt(ID_SPACE);
-  for (let offset = 0; offset < ID_SPACE; offset += 1) {
-    const candidate = `R-${((start + offset) % ID_SPACE).toString(36).padStart(3, "0")}`;
-    if (!occupied.has(candidate)) return candidate;
-  }
-  throw new Error("No R- record IDs remain");
+  return formatGeneratedId("R", nextGeneratedOrdinal(used));
 }
 export function checkpoint(root, fileOrText, { isText = false } = {}) {
   root = path.resolve(root); const source = readInput(fileOrText, isText);
@@ -286,6 +280,7 @@ export function checkpoint(root, fileOrText, { isText = false } = {}) {
     const knownFrontier = historicalFrontier(records); for (const node of current) knownFrontier.add(node.id);
     const knownRecords = new Set(records.map((record) => record.id));
     const knownObjects = new Set([...knownFrontier, ...knownRecords]);
+    const allocator = createIdAllocator(root, knownObjects);
     for (const relation of input.relations) {
       if (relation.type === "rsh:supersedes") throw new Error("rsh:supersedes may only be created by replaceRecord");
       if (!knownObjects.has(relation.target)) throw new Error(`record relation ${relation.type} references unknown object ${relation.target}`);
@@ -296,7 +291,8 @@ export function checkpoint(root, fileOrText, { isText = false } = {}) {
       if (!knownObjects.has(input.assertion.subject)) throw new Error(`record assertion references unknown subject ${input.assertion.subject}`);
       if (!knownObjects.has(input.assertion.object)) throw new Error(`record assertion references unknown object ${input.assertion.object}`);
     }
-    const { nodes, persisted } = applyActions(input.frontier, current, records, knownFrontier);
+    const { nodes, persisted } = applyActions(input.frontier, current, records, knownFrontier,
+      (kind) => allocator.allocate(kind === "question" ? "Q" : "D"));
     const relationKeys = new Set(input.relations.map((relation) => `${relation.type}\0${relation.target}`));
     for (const action of persisted) {
       if (action.action !== "open") continue;
@@ -305,13 +301,17 @@ export function checkpoint(root, fileOrText, { isText = false } = {}) {
       input.relations.push({ type: "rsh:about", target: action.id });
       relationKeys.add(key);
     }
-    const id = createRecordId(knownRecords);
+    const id = allocator.allocate("R");
     const latestCreatedAt = records.reduce((latest, record) => Math.max(latest, Date.parse(record.created_at)), 0);
     const createdAt = new Date(Math.max(Date.now(), latestCreatedAt + 1)).toISOString();
     const record = { ...input, id, created_at: createdAt, frontier: persisted, body };
     const recordPath = path.join(recordsDir, `${id}.md`); const updatedResearch = replaceOpenSection(research, nodes);
     if (typeof fsCore.commitFileBatch !== "function") throw new Error("fs.commitFileBatch is unavailable");
-    fsCore.commitFileBatch([{ target: recordPath, contents: serializeRecord(record) }, { target: researchPath, contents: updatedResearch }]);
+    fsCore.commitFileBatch([
+      { target: recordPath, contents: serializeRecord(record) },
+      { target: researchPath, contents: updatedResearch },
+      { target: allocator.file, contents: allocator.contents() }
+    ]);
     return { id: record.id, kind: record.kind, state: record.state, frontier_actions: persisted, ...bodyReceipt(body) };
   });
 }
@@ -341,6 +341,7 @@ export function replaceRecord(root, id, fileOrText, { isText = false } = {}) {
     const research = fs.readFileSync(researchPath, "utf8"); const current = parseFrontier(research);
     const knownFrontier = historicalFrontier(records); for (const node of current) knownFrontier.add(node.id);
     const knownRecords = new Set(records.map((record) => record.id)); const knownObjects = new Set([...knownFrontier, ...knownRecords]);
+    const allocator = createIdAllocator(root, knownObjects);
     for (const relation of input.relations) {
       if (!knownObjects.has(relation.target)) throw new Error(`record relation ${relation.type} references unknown object ${relation.target}`);
       if (relation.type === "rsh:about" && !isFrontierId(relation.target)) throw new Error("rsh:about must target a Q- or D- object");
@@ -350,7 +351,8 @@ export function replaceRecord(root, id, fileOrText, { isText = false } = {}) {
       if (!knownObjects.has(input.assertion.subject)) throw new Error(`record assertion references unknown subject ${input.assertion.subject}`);
       if (!knownObjects.has(input.assertion.object)) throw new Error(`record assertion references unknown object ${input.assertion.object}`);
     }
-    const { nodes, persisted } = applyActions(input.frontier, current, records, knownFrontier);
+    const { nodes, persisted } = applyActions(input.frontier, current, records, knownFrontier,
+      (kind) => allocator.allocate(kind === "question" ? "Q" : "D"));
     const relationKeys = new Set(input.relations.map((relation) => `${relation.type}\0${relation.target}`));
     for (const action of persisted) if (action.action === "open") {
       const key = `rsh:about\0${action.id}`;
@@ -366,7 +368,7 @@ export function replaceRecord(root, id, fileOrText, { isText = false } = {}) {
       ...input.relations.filter((relation) => relation.type !== "rsh:supersedes"),
       ...replacedIds.map((target) => ({ type: "rsh:supersedes", target }))
     ];
-    const newId = createRecordId(knownRecords);
+    const newId = allocator.allocate("R");
     const latestCreatedAt = records.reduce((latest, record) => Math.max(latest, Date.parse(record.created_at)), 0);
     const replacement = { ...input, id: newId, created_at: new Date(Math.max(Date.now(), latestCreatedAt + 1)).toISOString(), frontier: persisted, body };
     let sanitizedControlCount = 0;
@@ -383,7 +385,8 @@ export function replaceRecord(root, id, fileOrText, { isText = false } = {}) {
       ...predecessors.map((predecessor) => ({
         target: path.join(recordsDir, `${predecessor.id}.md`), contents: serializeRecord(predecessor)
       })),
-      { target: researchPath, contents: updatedResearch }
+      { target: researchPath, contents: updatedResearch },
+      { target: allocator.file, contents: allocator.contents() }
     ]);
     return {
       id: replacement.id, kind: replacement.kind, state: replacement.state,

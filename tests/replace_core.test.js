@@ -14,7 +14,7 @@ test("replace atomically creates a successor and withdraws its predecessor", () 
   const first = checkpoint(root, inputDocument(metadata(), "old body\n"), { isText: true });
   const body = "new body with $\\wedge$\n";
   const replacement = replaceRecord(root, first.id, inputDocument(metadata(), body), { isText: true });
-  assert.match(replacement.id, /^R-[0-9a-z]{3}$/);
+  assert.match(replacement.id, /^R-[0-9a-z]{5}$/);
   assert.notEqual(replacement.id, first.id);
   assert.equal(replacement.replaced_id, first.id);
   assert.equal(replacement.body_sha256, crypto.createHash("sha256").update(body).digest("hex"));

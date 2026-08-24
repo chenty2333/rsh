@@ -16,6 +16,11 @@ Describe the current research problem here.
 const LOCKS_IGNORE = `*
 !.gitignore
 `;
+const TRASH_IGNORE = `*
+!.gitignore
+`;
+const SEQUENCE_TEMPLATE = `next = 0
+`;
 
 const SKILLS = {
   "rsh-resume": {
@@ -34,13 +39,15 @@ const SKILLS = {
 
 1. Create a checkpoint only for a reusable result, an excluded path, a new question, or a frontier change.
 2. Store one main conclusion per result record. Its Markdown should normally cover Conclusion, Argument/Evidence, Scope (including assumptions, limits, and exceptions), and optionally Reuse.
-3. Put structured links in \`[[relations]]\` entries such as \`type = "rsh:about"\` and \`target = "Q-abc"\`; cite record IDs in the body where they are actually used. A frontier \`open\` action automatically adds \`rsh:about\` from this Record to each generated Q/D item.
-4. When a result's main conclusion is itself a relation, it may include one projection: \`[assertion]\`, with \`subject = "R-b2c"\`, \`predicate = "math:generalizes"\`, and \`object = "R-c3d"\`. The body remains authoritative.
+3. Put structured links in \`[[relations]]\` entries such as \`type = "rsh:about"\` and \`target = "Q-00000"\`; cite record IDs in the body where they are actually used. A frontier \`open\` action automatically adds \`rsh:about\` from this Record to each generated Q/D item.
+4. When a result's main conclusion is itself a relation, it may include one projection: \`[assertion]\`, with \`subject = "R-00002"\`, \`predicate = "math:generalizes"\`, and \`object = "R-00003"\`. The body remains authoritative.
 5. Dead ends should preserve the attempted goal, failure mechanism, evidence, scope, and \`retry_if\`; experiences should preserve the observation, applicable context, reusable method, and misuse boundary.
 6. Every record needs a non-empty Markdown body. With MCP, call \`rsh_checkpoint\` using structured \`kind\` and \`body\` fields plus optional \`relations\`, \`assertion\`, and \`frontier\`; with the CLI, run \`rsh checkpoint FILE.md\`. RSH rejects illegal C0 control characters while preserving tabs and line breaks.
 7. For batch creation through MCP, call the structured tool once per Record. Split batches only at semantic boundaries: never divide one theorem, proof, argument, or other independently readable conclusion because of line, size, or chunk boundaries. Never generate or execute JavaScript or shell command strings containing Markdown or LaTeX; language-level escaping can silently corrupt backslashes. After every write, compare the returned \`body_sha256\` and \`body_preview\` with the intended content before continuing.
 8. Correct an existing Record with \`rsh_replace\` (or \`rsh replace RECORD_ID FILE.md\`). Replacement atomically creates the successor, inherits \`rsh:about\`, adds its reserved \`rsh:supersedes\` relation, and withdraws the old Record. To merge split Records, include \`rsh:supersedes\` relations for additional predecessors in the replacement input; all are withdrawn atomically. If a predecessor contains prohibited controls, replacement renders them as visible \`\\uXXXX\` tokens and reports \`predecessor_controls_sanitized\`. Do not add \`rsh:supersedes\` to an ordinary checkpoint.
-9. Do not save ordinary step-by-step reasoning.
+9. New Q/D/R IDs are allocated automatically as five lowercase base36 digits from one workspace-global monotonically increasing sequence; legacy three-digit IDs remain readable. Never choose or reuse an ID yourself.
+10. Before removal, call \`rsh delete RECORD_ID --dry-run\` and inspect the complete recursive deletion set. \`rsh delete RECORD_ID\` snapshots and removes that closure; \`rsh undo\` restores the latest deletion. Only the latest three delete operations are retained locally.
+11. Do not save ordinary step-by-step reasoning.
 `
   }
 };
@@ -114,10 +121,13 @@ export function initializeWorkspace(root) {
   try {
     ensureTrackedDirectory(paths.records, root, created);
     ensureTrackedDirectory(paths.locks, root, created);
+    ensureTrackedDirectory(paths.trash, root, created);
     for (const skill of skills) ensureTrackedDirectory(path.dirname(skill.target), root, created);
     commitFileBatch([
       { target: paths.research, contents: RESEARCH_TEMPLATE },
       { target: path.join(paths.locks, ".gitignore"), contents: LOCKS_IGNORE },
+      { target: path.join(paths.trash, ".gitignore"), contents: TRASH_IGNORE },
+      { target: paths.sequence, contents: SEQUENCE_TEMPLATE },
       ...skills.filter(({ target }) => !fs.existsSync(target))
     ]);
   } catch (error) {

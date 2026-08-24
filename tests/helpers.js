@@ -13,4 +13,4 @@ export const inputDocument=(metadata,body="# Evidence\n\nDurable reasoning.\n")=
 export function treeSnapshot(root){const visit=(dir,prefix="")=>fs.existsSync(dir)?fs.readdirSync(dir,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name)).flatMap(e=>{const rel=path.join(prefix,e.name);if(rel.startsWith(path.join(".rsh","locks")))return[];return e.isDirectory()?visit(path.join(dir,e.name),rel):[[rel,fs.readFileSync(path.join(dir,e.name),"utf8")]];}):[];return visit(root);}
 export const Q1="Q-111",Q2="Q-222",D1="D-333";
 export const relation=(type,target)=>({type,target});
-export function setOpen(root,lines){const rendered=lines.map(line=>line.replace(/^([ ]*)- ([QD]-[0-9a-z]{3}) /,"$1- [$2] "));fs.writeFileSync(path.join(root,"RESEARCH.md"),`# Research\n\n## Context\n\n测试 $\\alpha$\n\n## Open\n${rendered.join("\n")}${rendered.length?"\n":""}`);}
+export function setOpen(root,lines){const rendered=lines.map(line=>line.replace(/^([ ]*)- ([QD]-(?:[0-9a-z]{3}|[0-9a-z]{5})) /,"$1- [$2] "));fs.writeFileSync(path.join(root,"RESEARCH.md"),`# Research\n\n## Context\n\n测试 $\\alpha$\n\n## Open\n${rendered.join("\n")}${rendered.length?"\n":""}`);}

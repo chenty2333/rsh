@@ -4,8 +4,9 @@ import { execFileSync } from "node:child_process";
 import { assertWorkspaceLayout, workspacePaths } from "./paths.js";
 import { isFrontierId, parseFrontier } from "./frontier.js";
 import { parseRecord } from "./record.js";
+import { RECORD_ID_PATTERN, hasExactIdReference } from "./ids.js";
 
-const RECORD_ID = /^R-[0-9a-z]{3}$/;
+const RECORD_ID = RECORD_ID_PATTERN;
 const KINDS = new Set(["result", "dead_end", "experience"]);
 const STATES = new Set(["unchecked", "checked", "withdrawn"]);
 
@@ -16,7 +17,7 @@ function locations(root) {
 
 function assertItemId(id) {
   if (!isFrontierId(id) && !RECORD_ID.test(id ?? "")) {
-    throw new Error("ID must be Q-, D-, or R- followed by exactly 3 lowercase base36 characters");
+    throw new Error("ID must be a Q-, D-, or R- ID with 3 legacy or 5 current lowercase base36 characters");
   }
   return id;
 }
@@ -97,7 +98,7 @@ function rgMatches(root, query, regex) {
     const file = event.data.path.text;
     if (!matches.has(file)) matches.set(file, { snippet: event.data.lines.text.trim(), frontierIds: new Set() });
     if (file === "RESEARCH.md") {
-      for (const match of event.data.lines.text.matchAll(/\[([QD]-[0-9a-z]{3})\]/g)) matches.get(file).frontierIds.add(match[1]);
+      for (const match of event.data.lines.text.matchAll(/\[([QD]-(?:[0-9a-z]{3}|[0-9a-z]{5}))\]/g)) matches.get(file).frontierIds.add(match[1]);
     }
   }
   return matches;
@@ -246,8 +247,7 @@ function referencesId(record, id) {
 }
 
 function bodyReferencesId(body, id) {
-  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, "m").test(body);
+  return hasExactIdReference(body, id);
 }
 
 function latestClose(records, id) {
