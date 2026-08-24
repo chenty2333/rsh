@@ -5,7 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { findRecords, formatFindMarkdown, formatStatusMarkdown, getItem, resumeResearch, statusWorkspace } from "./query.js";
-import { checkpoint, markRecord, serializeCheckpointDocument } from "./record.js";
+import { checkpoint, markRecord, replaceRecord, serializeCheckpointDocument } from "./record.js";
 import { doctor, formatDoctorMarkdown } from "./doctor.js";
 
 const require = createRequire(import.meta.url);
@@ -66,6 +66,10 @@ const TOOLS = {
   } },
   rsh_get: { description: "Get one research item by ID.", inputSchema: { id: ID } },
   rsh_checkpoint: { description: "Checkpoint one structured research Record. Kind and non-empty Markdown body are required; relations, assertion, and frontier changes are optional.", inputSchema: CHECKPOINT_INPUT },
+  rsh_replace: { description: "Atomically create a corrected successor and withdraw its predecessor. To merge split Records, supply additional predecessors as rsh:supersedes relations; all are withdrawn together.", inputSchema: CHECKPOINT_INPUT.extend({
+    record_id: RECORD_ID.describe("Existing Record to replace."),
+    state: z.enum(["unchecked", "checked"]).optional().describe("Local workflow state for the active successor; defaults to unchecked.")
+  }).strict() },
   rsh_mark: { description: "Set the state of an existing research record.", inputSchema: { record_id: RECORD_ID, state: z.enum(["unchecked", "checked", "withdrawn"]) } },
   rsh_status: { description: "Show the current RSH workspace status.", inputSchema: {} },
   rsh_doctor: { description: "Audit the RSH workspace and report actionable findings.", inputSchema: {} }
@@ -143,6 +147,17 @@ async function callTool(root, name, args) {
     case "rsh_find": { const { query = "", ...options } = args; const result = portable(await findRecords(root, query, options), root); return response(formatFindMarkdown(result), result, recordLinks(result.map((item) => item.id))); }
     case "rsh_get": { const result = portable(await getItem(root, args.id), root); return response(recordDocument(result), result, recordLinks([args.id])); }
     case "rsh_checkpoint": { const document = serializeCheckpointDocument(args); const result = portable(await checkpoint(root, document, { isText: true }), root); const id = resultId(result); return response(writeMarkdown("Checkpoint saved", id), result, links(id)); }
+    case "rsh_replace": {
+      const { record_id: oldId, ...input } = args;
+      const document = serializeCheckpointDocument(input);
+      const result = portable(await replaceRecord(root, oldId, document, { isText: true }), root);
+      const newId = resultId(result);
+      const verification = [result.body_sha256 ? `- **Body SHA-256:** ${result.body_sha256}` : null,
+        result.body_preview ? `- **Body preview:** ${result.body_preview}` : null].filter(Boolean).join("\n");
+      const replacedIds = result.replaced_ids ?? [result.replaced_id];
+      const text = `${writeMarkdown("Record replaced", newId)}\n- **Replaced:** ${replacedIds.join(", ")}${verification ? `\n${verification}` : ""}`;
+      return response(text, result, recordLinks([...replacedIds, result.id]));
+    }
     case "rsh_mark": { const result = portable(await markRecord(root, args.record_id, args.state), root); const id = resultId(result, args.record_id); return response(writeMarkdown("Record state updated", id, args.state), result, links(id)); }
     case "rsh_status": { const result = portable(await statusWorkspace(root), root); return response(formatStatusMarkdown(result), result); }
     case "rsh_doctor": { const result = portable(await doctor(root), root); return response(formatDoctorMarkdown(result), result); }

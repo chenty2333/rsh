@@ -25,6 +25,28 @@ const ACTION_FIELDS = Object.freeze({
 const STORED_ACTION_FIELDS = new Set(["action", "id", "outcome", "before", "after"]);
 const SNAPSHOT_FIELDS = new Set(["kind", "text", "parent"]);
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+const ILLEGAL_BODY_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+const ILLEGAL_BODY_CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+function validateBody(body, { allowIllegalControls = false } = {}) {
+  if (typeof body !== "string" || !body.trim()) throw new Error("record body must contain non-empty Markdown text");
+  const match = ILLEGAL_BODY_CONTROL.exec(body);
+  if (match && !allowIllegalControls) throw new Error(`record body contains illegal control character U+${match[0].codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`);
+}
+function sanitizeBodyControls(body) {
+  let count = 0;
+  const sanitized = body.replace(ILLEGAL_BODY_CONTROLS, (character) => {
+    count += 1;
+    return `\\u${character.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+  });
+  return { body: sanitized, count };
+}
+function bodyReceipt(body) {
+  return {
+    body_sha256: crypto.createHash("sha256").update(body, "utf8").digest("hex"),
+    body_preview: body.trim().replace(/\s+/g, " ").slice(0, 160)
+  };
+}
 
 function plain(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -49,6 +71,7 @@ function validateRelations(value) {
     rejectUnknown(relation, new Set(["type", "target"]), label);
     validatePredicate(relation.type, `${label}.type`);
     if (typeof relation.target !== "string" || !OBJECT_ID.test(relation.target)) throw new Error(`${label}.target must be a Q-, D-, or R- ID`);
+    if (relation.type === "rsh:supersedes" && !ID.test(relation.target)) throw new Error("rsh:supersedes must target an R- object");
     const key = `${relation.type}\0${relation.target}`;
     if (seen.has(key)) throw new Error(`record.relations contains duplicate relation ${relation.type} -> ${relation.target}`);
     seen.add(key);
@@ -122,7 +145,7 @@ export function validateRecord(record, { input = false } = {}) {
   return record;
 }
 
-export function parseRecord(text, options = {}) {
+function parseRecordInternal(text, options = {}) {
   if (typeof text !== "string" || !text.startsWith("+++")) throw new Error("record must begin with +++ TOML frontmatter");
   const firstEnd = text.indexOf("\n");
   if (firstEnd < 0 || text.slice(0, firstEnd).replace(/\r$/, "") !== "+++") throw new Error("record opening delimiter must be on its own line");
@@ -133,21 +156,24 @@ export function parseRecord(text, options = {}) {
   try { metadata = parseToml(text.slice(firstEnd + 1, match.index)); } catch (error) { throw new Error(`Invalid record TOML: ${error.message}`); }
   const after = text.indexOf("\n", match.index);
   const body = after < 0 ? "" : text.slice(after + 1);
-  if (!body.trim()) throw new Error("record body must contain non-empty Markdown text");
+  validateBody(body, { allowIllegalControls: options.allowIllegalBodyControls === true });
   validateRecord(metadata, options);
   return { ...metadata, body };
+}
+export function parseRecord(text, options = {}) {
+  return parseRecordInternal(text, { input: options.input === true });
 }
 export function serializeRecord(record) {
   if (!plain(record)) throw new Error("record must be an object");
   const { body = "", ...metadata } = record;
-  if (typeof body !== "string" || !body.trim()) throw new Error("record body must contain non-empty Markdown text");
+  validateBody(body);
   validateRecord(metadata);
   return `+++\n${stringifyToml(metadata).trimEnd()}\n+++\n${body}`;
 }
 export function serializeCheckpointDocument(input) {
   if (!plain(input)) throw new Error("checkpoint input must be an object");
   const { body = "", ...metadata } = input;
-  if (typeof body !== "string" || !body.trim()) throw new Error("record body must contain non-empty Markdown text");
+  validateBody(body);
   validateRecord(metadata, { input: true });
   return `+++\n${stringifyToml(metadata).trimEnd()}\n+++\n${body}`;
 }
@@ -155,17 +181,17 @@ function locations(root) {
   const paths = workspacePaths(path.resolve(root));
   return { paths, records: paths.records ?? path.join(paths.rsh, "records"), research: paths.research ?? path.join(paths.root, "RESEARCH.md") };
 }
-function readRecordFile(file) {
+function readRecordFile(file, options = {}) {
   const stat = fs.lstatSync(file, { throwIfNoEntry: false });
   if (!stat || stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Invalid RSH record file ${path.basename(file)}`);
-  return parseRecord(fs.readFileSync(file, "utf8"));
+  return parseRecordInternal(fs.readFileSync(file, "utf8"), options);
 }
-export function listRecords(root) {
+export function listRecords(root, options = {}) {
   assertWorkspaceLayout(root);
   const { records } = locations(root);
   return fs.readdirSync(records).map((name) => {
     if (!/^R-[0-9a-z]{3}\.md$/.test(name)) throw new Error(`Invalid RSH record filename ${name}`);
-    const record = readRecordFile(path.join(records, name));
+    const record = readRecordFile(path.join(records, name), options);
     if (`${record.id}.md` !== name) throw new Error(`Record filename ${name} does not match stored ID ${record.id}`);
     return record;
   }).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id.localeCompare(b.id));
@@ -261,6 +287,7 @@ export function checkpoint(root, fileOrText, { isText = false } = {}) {
     const knownRecords = new Set(records.map((record) => record.id));
     const knownObjects = new Set([...knownFrontier, ...knownRecords]);
     for (const relation of input.relations) {
+      if (relation.type === "rsh:supersedes") throw new Error("rsh:supersedes may only be created by replaceRecord");
       if (!knownObjects.has(relation.target)) throw new Error(`record relation ${relation.type} references unknown object ${relation.target}`);
       if (relation.type === "rsh:about" && !isFrontierId(relation.target)) throw new Error("rsh:about must target a Q- or D- object");
       if ((relation.type === "rsh:depends_on" || relation.type === "rsh:derived_from") && !ID.test(relation.target)) throw new Error(`${relation.type} must target an R- object`);
@@ -285,7 +312,85 @@ export function checkpoint(root, fileOrText, { isText = false } = {}) {
     const recordPath = path.join(recordsDir, `${id}.md`); const updatedResearch = replaceOpenSection(research, nodes);
     if (typeof fsCore.commitFileBatch !== "function") throw new Error("fs.commitFileBatch is unavailable");
     fsCore.commitFileBatch([{ target: recordPath, contents: serializeRecord(record) }, { target: researchPath, contents: updatedResearch }]);
-    return { id: record.id, kind: record.kind, state: record.state, frontier_actions: persisted };
+    return { id: record.id, kind: record.kind, state: record.state, frontier_actions: persisted, ...bodyReceipt(body) };
+  });
+}
+export function replaceRecord(root, id, fileOrText, { isText = false } = {}) {
+  root = path.resolve(root); const source = readInput(fileOrText, isText);
+  assertWorkspaceLayout(root);
+  return withWorkspaceWriteLock(root, () => {
+    const { records: recordsDir, research: researchPath } = locations(root);
+    if (!ID.test(id ?? "")) throw new Error("record ID is invalid");
+    const records = listRecords(root, { allowIllegalBodyControls: true });
+    if (!records.some((record) => record.id === id)) throw new Error(`Record ${id} does not exist`);
+    const input = parseRecord(source, { input: true }); const body = input.body; delete input.body;
+    if (input.state === "withdrawn") throw new Error("replacement successor cannot start withdrawn");
+    const additionalPredecessors = input.relations
+      .filter((relation) => relation.type === "rsh:supersedes")
+      .map((relation) => relation.target);
+    if (additionalPredecessors.includes(id)) throw new Error("replacement relations must not repeat the primary predecessor");
+    const replacedIds = [id, ...additionalPredecessors];
+    const predecessors = replacedIds.map((replacedId) => {
+      const record = records.find((candidate) => candidate.id === replacedId);
+      if (!record) throw new Error(`Record ${replacedId} does not exist`);
+      if (records.some((candidate) => candidate.relations.some((relation) => relation.type === "rsh:supersedes" && relation.target === replacedId))) {
+        throw new Error(`Record ${replacedId} already has a successor`);
+      }
+      return record;
+    });
+    const research = fs.readFileSync(researchPath, "utf8"); const current = parseFrontier(research);
+    const knownFrontier = historicalFrontier(records); for (const node of current) knownFrontier.add(node.id);
+    const knownRecords = new Set(records.map((record) => record.id)); const knownObjects = new Set([...knownFrontier, ...knownRecords]);
+    for (const relation of input.relations) {
+      if (!knownObjects.has(relation.target)) throw new Error(`record relation ${relation.type} references unknown object ${relation.target}`);
+      if (relation.type === "rsh:about" && !isFrontierId(relation.target)) throw new Error("rsh:about must target a Q- or D- object");
+      if ((relation.type === "rsh:depends_on" || relation.type === "rsh:derived_from") && !ID.test(relation.target)) throw new Error(`${relation.type} must target an R- object`);
+    }
+    if (input.assertion) {
+      if (!knownObjects.has(input.assertion.subject)) throw new Error(`record assertion references unknown subject ${input.assertion.subject}`);
+      if (!knownObjects.has(input.assertion.object)) throw new Error(`record assertion references unknown object ${input.assertion.object}`);
+    }
+    const { nodes, persisted } = applyActions(input.frontier, current, records, knownFrontier);
+    const relationKeys = new Set(input.relations.map((relation) => `${relation.type}\0${relation.target}`));
+    for (const action of persisted) if (action.action === "open") {
+      const key = `rsh:about\0${action.id}`;
+      if (!relationKeys.has(key)) { input.relations.push({ type: "rsh:about", target: action.id }); relationKeys.add(key); }
+    }
+    for (const predecessor of predecessors) {
+      for (const relation of predecessor.relations.filter((item) => item.type === "rsh:about")) {
+        const key = `rsh:about\0${relation.target}`;
+        if (!relationKeys.has(key)) { input.relations.push({ ...relation }); relationKeys.add(key); }
+      }
+    }
+    input.relations = [
+      ...input.relations.filter((relation) => relation.type !== "rsh:supersedes"),
+      ...replacedIds.map((target) => ({ type: "rsh:supersedes", target }))
+    ];
+    const newId = createRecordId(knownRecords);
+    const latestCreatedAt = records.reduce((latest, record) => Math.max(latest, Date.parse(record.created_at)), 0);
+    const replacement = { ...input, id: newId, created_at: new Date(Math.max(Date.now(), latestCreatedAt + 1)).toISOString(), frontier: persisted, body };
+    let sanitizedControlCount = 0;
+    for (const predecessor of predecessors) {
+      predecessor.state = "withdrawn";
+      const sanitized = sanitizeBodyControls(predecessor.body);
+      predecessor.body = sanitized.body;
+      sanitizedControlCount += sanitized.count;
+    }
+    const updatedResearch = replaceOpenSection(research, nodes);
+    if (typeof fsCore.commitFileBatch !== "function") throw new Error("fs.commitFileBatch is unavailable");
+    fsCore.commitFileBatch([
+      { target: path.join(recordsDir, `${newId}.md`), contents: serializeRecord(replacement) },
+      ...predecessors.map((predecessor) => ({
+        target: path.join(recordsDir, `${predecessor.id}.md`), contents: serializeRecord(predecessor)
+      })),
+      { target: researchPath, contents: updatedResearch }
+    ]);
+    return {
+      id: replacement.id, kind: replacement.kind, state: replacement.state,
+      replaced_id: id, replaced_ids: replacedIds,
+      predecessor_controls_sanitized: sanitizedControlCount,
+      frontier_actions: persisted, ...bodyReceipt(body)
+    };
   });
 }
 export function markRecord(root, id, state) {
@@ -295,6 +400,10 @@ export function markRecord(root, id, state) {
   return withWorkspaceWriteLock(root, () => {
     const file = path.join(locations(root).records, `${id}.md`);
     if (!ID.test(id ?? "") || !fs.existsSync(file)) throw new Error(`Record ${id} does not exist`);
+    if (state !== "withdrawn" && listRecords(root).some((candidate) => candidate.relations
+      .some((relation) => relation.type === "rsh:supersedes" && relation.target === id))) {
+      throw new Error(`Record ${id} has been superseded and must remain withdrawn`);
+    }
     const record = readRecordFile(file); record.state = state;
     if (typeof fsCore.commitFileBatch !== "function") throw new Error("fs.commitFileBatch is unavailable");
     fsCore.commitFileBatch([{ target: file, contents: serializeRecord(record) }]); return { id: record.id, state: record.state };

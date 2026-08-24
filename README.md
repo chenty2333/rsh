@@ -99,6 +99,9 @@ transaction before publishing it under a generated `R-xxx` ID.
 Each successful frontier `open` action also stores an automatic `rsh:about`
 relation from that Record to the newly generated Q/D item, so the originating
 Record appears immediately in the new item's resume summary.
+Successful checkpoints return the new `id`, a SHA-256 digest of the exact
+Markdown body as `body_sha256`, and a short `body_preview`. RSH rejects C0
+control characters in bodies except tabs and line breaks.
 
 Each `result` holds one main conclusion with its complete argument and scope.
 Auxiliary proof steps stay in the body; split out only an independently reusable
@@ -113,6 +116,9 @@ Relations use lowercase `namespace:predicate_name` names:
   with the frontier during resume.
 - `rsh:depends_on` targets an existing `R-` and produces reminders.
 - `rsh:derived_from` targets an existing `R-` and records provenance.
+- `rsh:supersedes` targets a Record replaced by this Record. It is reserved for
+  `replace`; one successor may merge multiple predecessors, while each old
+  Record can have at most one direct successor.
 
 Custom relations such as `math:generalizes`, `alice:refines`, and
 `lean:formalizes` are stored and searchable without automatic reasoning,
@@ -135,6 +141,7 @@ rsh init
 rsh resume [--all]
 rsh find QUERY [--regex] [--kind KIND] [--state STATE] [--limit N]
 rsh checkpoint FILE.md
+rsh replace RECORD_ID FILE.md
 rsh get ID
 rsh mark RECORD_ID unchecked|checked|withdrawn
 rsh status
@@ -142,17 +149,26 @@ rsh doctor
 rsh mcp
 ```
 
-`rsh resume` groups Records through `rsh:about` and flags withdrawn
-dependencies. `rsh get R-xxx` prints the raw Record followed by derived
-backlinks and missing or withdrawn dependency reminders. `rsh find
+`rsh replace R-a9z FILE.md` atomically creates a corrected successor, adds
+`rsh:supersedes` pointing to `R-a9z`, and withdraws `R-a9z`.
+The successor inherits the predecessor's `rsh:about` relations. If the old body
+contains a prohibited control character, replacement renders it visibly as a
+literal `\\uXXXX` token while preserving the old Record as withdrawn history.
+To merge several incomplete Records, add `rsh:supersedes` relations for the
+additional predecessors to the replacement input; all predecessors are
+withdrawn in the same transaction.
+`rsh resume` groups Records through `rsh:about`, prefers the latest active replacement,
+and flags withdrawn dependencies. `rsh get R-xxx` prints the raw Record followed
+by replacement history, derived backlinks, and dependency reminders. `rsh find
 <ID>` uses `rg` to find relations, assertion endpoints, and Markdown references.
 Other searches are fixed-string smart-case unless `--regex` is supplied; kind,
-state, and limit filters still apply. There is no index or cache.
+state, and limit filters still apply. Compact results prefer active replacement
+heads; withdrawn versions remain available explicitly. There is no index or cache.
 
 ## MCP
 
 The MCP server exposes `rsh_resume`, `rsh_find`, `rsh_get`, `rsh_checkpoint`,
-`rsh_mark`, `rsh_status`, and `rsh_doctor`, plus `rsh://state` and
+`rsh_replace`, `rsh_mark`, `rsh_status`, and `rsh_doctor`, plus `rsh://state` and
 `rsh://record/{id}`. `rsh_checkpoint` accepts structured fields rather than a
 TOML document string:
 
@@ -173,6 +189,14 @@ TOML document string:
 `retry_if`, `relations`, `assertion`, and `frontier` are optional. The tool
 constructs the canonical TOML document internally and uses the same validation,
 locking, and atomic write path as the CLI.
+
+`rsh_replace` takes `record_id` plus the same structured checkpoint fields.
+Both write tools return `id`, `body_sha256`, and `body_preview`; replacement
+also returns `replaced_id`, `replaced_ids`, and
+`predecessor_controls_sanitized`. For batches, invoke the structured MCP tool once per
+Record and verify those fields after every write. Never generate JavaScript or
+shell command strings containing Markdown or LaTeX: escaping can silently
+consume backslashes before RSH receives the body.
 
 ## Development
 

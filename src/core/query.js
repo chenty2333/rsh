@@ -113,6 +113,7 @@ export function findRecords(root, query = "", options = {}) {
   assertWorkspaceLayout(root);
   const matches = rgMatches(paths.root, query, regex);
   const records = new Map(recordEntries(root).map((record) => [record.relativePath, record]));
+  const replacement = replacementIndex([...records.values()]);
   const results = [];
 
   for (const [file, match] of matches) {
@@ -139,17 +140,21 @@ export function findRecords(root, query = "", options = {}) {
       title: record.title,
       snippet: match.snippet,
       withdrawn: record.metadata.state === "withdrawn",
+      supersededBy: replacement.successors.get(record.id) ?? [],
+      _priority: state === undefined && isDeprecated(record, replacement) ? 1 : 0,
       _time: record.time
     });
   }
-  return results.sort((a, b) => b._time - a._time || b.id.localeCompare(a.id)).slice(0, limit).map(({ _time, ...result }) => result);
+  return results.sort((a, b) => (a._priority ?? 0) - (b._priority ?? 0) || b._time - a._time || b.id.localeCompare(a.id)).slice(0, limit).map(({ _time, _priority, ...result }) => result);
 }
 
-function recordSummary(record, allRecords) {
+function recordSummary(record, allRecords, replacement = replacementIndex(allRecords)) {
   const metadata = record.metadata;
   const flags = [];
   if (metadata.state === "unchecked") flags.push("**UNCHECKED**");
   if (metadata.state === "withdrawn") flags.push("**WITHDRAWN**");
+  const supersededBy = replacement.successors.get(record.id) ?? [];
+  if (supersededBy.length) flags.push(`superseded by ${supersededBy.join(", ")}`);
   const withdrawn = relationTargets(record, "rsh:depends_on").filter((id) => allRecords.some((item) => item.id === id && item.metadata.state === "withdrawn"));
   if (withdrawn.length) flags.push(`depends on withdrawn ${withdrawn.join(", ")}`);
   const lines = [`- **${record.id}** [${metadata.kind}/${metadata.state}] ${record.title}${flags.length ? ` — ${flags.join("; ")}` : ""}`];
@@ -164,12 +169,14 @@ export function resumeResearch(root, { all = false } = {}) {
   const research = fs.readFileSync(paths.research, "utf8");
   const frontier = parseFrontier(research);
   const records = recordEntries(root);
+  const replacement = replacementIndex(records);
   const groups = [];
   for (const node of frontier) {
     const related = latestFirst(records.filter((record) => hasRelation(record, "rsh:about", node.id)));
     if (!related.length) continue;
-    const visible = all ? related : related.slice(0, 3);
-    const lines = [`### ${node.id} — ${node.text}`, "", ...visible.map((record) => recordSummary(record, records))];
+    const current = related.filter((record) => !isDeprecated(record, replacement));
+    const visible = all ? related : current.slice(0, 3);
+    const lines = [`### ${node.id} — ${node.text}`, "", ...visible.map((record) => recordSummary(record, records, replacement))];
     if (!all && related.length > visible.length) {
       lines.push("", `${related.length - visible.length} more record(s): \`rsh find ${node.id}\``);
     }
@@ -194,6 +201,42 @@ function relationTargets(record, type) {
 
 function hasRelation(record, type, target) {
   return relationsOf(record).some((relation) => relation.type === type && relation.target === target);
+}
+
+function replacementIndex(records) {
+  const ids = new Set(records.map((record) => record.id));
+  const predecessors = new Map();
+  const successors = new Map();
+  for (const record of records) {
+    const targets = relationTargets(record, "rsh:supersedes").filter((id) => ids.has(id));
+    if (targets.length) predecessors.set(record.id, targets);
+    for (const target of targets) successors.set(target, [...(successors.get(target) ?? []), record.id]);
+  }
+  return { predecessors, successors };
+}
+
+function isDeprecated(record, replacement) {
+  return record.metadata.state === "withdrawn" || replacement.successors.has(record.id);
+}
+
+function replacementPaths(id, replacement) {
+  const component = new Set();
+  const pending = [id];
+  while (pending.length) {
+    const current = pending.pop();
+    if (component.has(current)) continue;
+    component.add(current);
+    pending.push(...(replacement.predecessors.get(current) ?? []), ...(replacement.successors.get(current) ?? []));
+  }
+  const roots = [...component].filter((item) => !(replacement.predecessors.get(item) ?? []).some((previous) => component.has(previous)));
+  const paths = [];
+  const walk = (current, path, seen) => {
+    const next = (replacement.successors.get(current) ?? []).filter((item) => component.has(item) && !seen.has(item));
+    if (!next.length) { paths.push(path); return; }
+    for (const successor of next) walk(successor, [...path, successor], new Set(seen).add(successor));
+  };
+  for (const root of roots.length ? roots : [id]) walk(root, [root], new Set([root]));
+  return paths;
 }
 
 function referencesId(record, id) {
@@ -226,13 +269,23 @@ export function getItem(root, id) {
     const record = records.find((item) => item.id === id);
     if (!record) throw new Error(`Record ${id} does not exist`);
     const backlinks = records.filter((item) => item.id !== id && referencesId(item, id));
+    const replacement = replacementIndex(records);
+    const supersedes = replacement.predecessors.get(id) ?? [];
+    const supersededBy = replacement.successors.get(id) ?? [];
+    const replacementSection = supersedes.length || supersededBy.length
+      ? `\n\n## Replacement chain\n\n${[
+        `- Supersedes: ${supersedes.length ? supersedes.join(", ") : "_None._"}`,
+        `- Superseded by: ${supersededBy.length ? supersededBy.join(", ") : "_None._"}`,
+        `- Chain: ${replacementPaths(id, replacement).map((path) => path.join(" → ")).join("; ")}`
+      ].join("\n")}`
+      : "";
     const dependencies = relationTargets(record, "rsh:depends_on").map((dependency) => ({ id: dependency, record: records.find((item) => item.id === dependency) }));
     const reminders = dependencies.length
       ? dependencies.map(({ id: dependency, record: item }) => item
         ? `- ${item.id}: ${item.metadata.state}${item.metadata.state === "withdrawn" ? " — **WITHDRAWN**" : ""}`
         : `- ${dependency}: **MISSING**`).join("\n")
       : "_None._";
-    return `${record.raw.trimEnd()}\n\n## RSH backlinks\n\n${formatRelated(backlinks)}\n\n## Dependency reminders\n\n${reminders}\n`;
+    return `${record.raw.trimEnd()}${replacementSection}\n\n## RSH backlinks\n\n${formatRelated(backlinks)}\n\n## Dependency reminders\n\n${reminders}\n`;
   }
 
   const current = parseFrontier(fs.readFileSync(paths.research, "utf8")).find((node) => node.id === id);
@@ -294,5 +347,5 @@ export function formatStatusMarkdown(status) {
 
 export function formatFindMarkdown(results) {
   if (!results.length) return "No matches.";
-  return results.map((item) => `- **${item.id}** [${item.kind}/${item.state}] ${item.title}${item.withdrawn ? " — **WITHDRAWN**" : ""}\n  ${item.snippet}`).join("\n");
+  return results.map((item) => `- **${item.id}** [${item.kind}/${item.state}] ${item.title}${item.withdrawn ? " — **WITHDRAWN**" : ""}${item.supersededBy?.length ? ` — superseded by ${item.supersededBy.join(", ")}` : ""}\n  ${item.snippet}`).join("\n");
 }

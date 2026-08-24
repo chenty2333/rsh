@@ -25,6 +25,7 @@ const SKILLS = {
 1. Run \`rsh resume\` at the start of a research turn.
 2. Use \`rsh find\` and \`rsh get\` only when relevant records need expansion.
 3. Continue from the open frontier in \`RESEARCH.md\`; \`rsh:about\` relations group records with frontier items.
+4. Treat an \`rsh:supersedes\` chain as Record replacement history. Prefer the latest active successor; expand superseded or withdrawn versions only when their history matters.
 `
   },
   "rsh-checkpoint": {
@@ -36,8 +37,10 @@ const SKILLS = {
 3. Put structured links in \`[[relations]]\` entries such as \`type = "rsh:about"\` and \`target = "Q-abc"\`; cite record IDs in the body where they are actually used. A frontier \`open\` action automatically adds \`rsh:about\` from this Record to each generated Q/D item.
 4. When a result's main conclusion is itself a relation, it may include one projection: \`[assertion]\`, with \`subject = "R-b2c"\`, \`predicate = "math:generalizes"\`, and \`object = "R-c3d"\`. The body remains authoritative.
 5. Dead ends should preserve the attempted goal, failure mechanism, evidence, scope, and \`retry_if\`; experiences should preserve the observation, applicable context, reusable method, and misuse boundary.
-6. Every record needs a non-empty Markdown body. With MCP, call \`rsh_checkpoint\` using structured \`kind\` and \`body\` fields plus optional \`relations\`, \`assertion\`, and \`frontier\`; with the CLI, run \`rsh checkpoint FILE.md\`.
-7. Do not save ordinary step-by-step reasoning.
+6. Every record needs a non-empty Markdown body. With MCP, call \`rsh_checkpoint\` using structured \`kind\` and \`body\` fields plus optional \`relations\`, \`assertion\`, and \`frontier\`; with the CLI, run \`rsh checkpoint FILE.md\`. RSH rejects illegal C0 control characters while preserving tabs and line breaks.
+7. For batch creation through MCP, call the structured tool once per Record. Split batches only at semantic boundaries: never divide one theorem, proof, argument, or other independently readable conclusion because of line, size, or chunk boundaries. Never generate or execute JavaScript or shell command strings containing Markdown or LaTeX; language-level escaping can silently corrupt backslashes. After every write, compare the returned \`body_sha256\` and \`body_preview\` with the intended content before continuing.
+8. Correct an existing Record with \`rsh_replace\` (or \`rsh replace RECORD_ID FILE.md\`). Replacement atomically creates the successor, inherits \`rsh:about\`, adds its reserved \`rsh:supersedes\` relation, and withdraws the old Record. To merge split Records, include \`rsh:supersedes\` relations for additional predecessors in the replacement input; all are withdrawn atomically. If a predecessor contains prohibited controls, replacement renders them as visible \`\\uXXXX\` tokens and reports \`predecessor_controls_sanitized\`. Do not add \`rsh:supersedes\` to an ordinary checkpoint.
+9. Do not save ordinary step-by-step reasoning.
 `
   }
 };

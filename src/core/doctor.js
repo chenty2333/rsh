@@ -85,6 +85,43 @@ function validateHistory(records, current) {
   }
 }
 
+function validateReplacements(records) {
+  const byId = new Map(records.map((record) => [record.id, record]));
+  const predecessorsBySuccessor = new Map();
+  const successorByPredecessor = new Map();
+  for (const record of records) {
+    const targets = record.relations
+      .filter((relation) => relation.type === "rsh:supersedes")
+      .map((relation) => relation.target);
+    if (!targets.length) continue;
+    for (const target of targets) {
+      if (target === record.id) throw new Error(`${record.id} cannot supersede itself`);
+      const predecessor = byId.get(target);
+      if (!predecessor) throw new Error(`${record.id} rsh:supersedes references missing record ${target}`);
+      if (successorByPredecessor.has(target)) {
+        throw new Error(`${target} has multiple direct successors: ${successorByPredecessor.get(target)} and ${record.id}`);
+      }
+      if (predecessor.state !== "withdrawn") throw new Error(`${target} has a successor but is not withdrawn`);
+      if (Date.parse(record.created_at) <= Date.parse(predecessor.created_at)) {
+        throw new Error(`${record.id} must be newer than the Record it supersedes (${target})`);
+      }
+      successorByPredecessor.set(target, record.id);
+    }
+    predecessorsBySuccessor.set(record.id, targets);
+  }
+  const complete = new Set();
+  const visit = (id, active = new Set()) => {
+    if (active.has(id)) throw new Error(`replacement chain containing ${id} has a cycle`);
+    if (complete.has(id)) return;
+    const nextActive = new Set(active).add(id);
+    for (const predecessor of predecessorsBySuccessor.get(id) ?? []) visit(predecessor, nextActive);
+    complete.add(id);
+  };
+  for (const start of predecessorsBySuccessor.keys()) {
+    visit(start);
+  }
+}
+
 /** Audit a workspace without changing it. */
 export function doctor(root) {
   root = path.resolve(root);
@@ -133,7 +170,7 @@ export function doctor(root) {
         if (relation.type === "rsh:about") {
           if (!/^[QD]-/.test(relation.target)) throw new Error(`${record.id} rsh:about target must be Q/D`);
           if (!frontierIds.has(relation.target)) throw new Error(`${record.id} rsh:about references missing frontier ${relation.target}`);
-        } else if (relation.type === "rsh:depends_on" || relation.type === "rsh:derived_from") {
+        } else if (relation.type === "rsh:depends_on" || relation.type === "rsh:derived_from" || relation.type === "rsh:supersedes") {
           if (!/^R-/.test(relation.target)) throw new Error(`${record.id} ${relation.type} target must be R`);
           if (!recordIds.has(relation.target)) throw new Error(`${record.id} ${relation.type} references missing record ${relation.target}`);
         } else if (/^R-/.test(relation.target) ? !recordIds.has(relation.target) : !frontierIds.has(relation.target)) {
@@ -151,8 +188,9 @@ export function doctor(root) {
         }
       }
     }
+    validateReplacements(records);
     validateHistory(records, frontier);
-    add("record references", true, "relations, assertions, and frontier snapshots resolve");
+    add("record references", true, "relations, assertions, replacement chains, and frontier snapshots resolve");
   } catch (error) { add("record references", false, error.message); }
 
   for (const { target, contents } of generatedSkillFiles(root)) {

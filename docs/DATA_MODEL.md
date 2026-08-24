@@ -23,6 +23,7 @@ A Record is a complete document: TOML frontmatter delimited by `+++`, followed
 by non-empty Markdown. Kinds are `result`, `dead_end`, and `experience`; states
 are `unchecked`, `checked`, and `withdrawn`. State is a local workflow marker,
 not mathematical truth, and never propagates through relations.
+Bodies must not contain C0 control characters other than tabs and line breaks.
 
 A `result` contains one main conclusion, its complete argument or evidence, and
 the applicable scope, assumptions, limitations, and exceptions. Reusable
@@ -55,10 +56,22 @@ belong in Markdown. Duplicate relations are invalid.
   automatically stores this relation on the originating Record.
 - `rsh:depends_on` targets an existing `R-` and creates reminders only.
 - `rsh:derived_from` targets an existing `R-` and records provenance.
+- `rsh:supersedes` targets the predecessor of a replacement. It is created only
+  by the atomic replace operation, never by an ordinary checkpoint. Each
+  predecessor has at most one direct successor; one complete successor may
+  supersede several incomplete predecessors, and replacement withdraws them all.
+  A superseded predecessor cannot later be marked active again.
 - Custom namespaces such as `math:*`, `alice:*`, and `lean:*` are preserved and
   searchable but have no automatic inference, withdrawal, or scheduling effect.
 
 Backlinks are derived at read time; they are never stored.
+
+Replacement creates a complete new Record instead of mutating a body, preserves
+the predecessor as withdrawn history, and connects the two with
+`rsh:supersedes`. It inherits `rsh:about` relations. If a predecessor already
+contains prohibited control characters, replacement renders them as visible
+literal `\\uXXXX` tokens so both versions remain parseable. Readers prefer the
+latest active chain head by default.
 
 ## Relational assertions
 
