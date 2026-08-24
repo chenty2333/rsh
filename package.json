@@ -1,6 +1,6 @@
 {
   "name": "rsh-research",
-  "version": "0.2.0",
+  "version": "0.1.2",
   "description": "A lightweight, local, Git-native research state notebook for agents.",
   "type": "module",
   "bin": {
