@@ -23,14 +23,21 @@ function processStartToken(pid) {
   }
 }
 
-function readHolder(lockPath) {
+function inspectHolder(lockPath) {
   try {
     const holderPath = fs.statSync(lockPath).isDirectory() ? path.join(lockPath, "holder.json") : lockPath;
     const value = JSON.parse(fs.readFileSync(holderPath, "utf8"));
-    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
-  } catch {
-    return null;
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? { kind: "holder", value }
+      : { kind: "invalid" };
+  } catch (error) {
+    return error?.code === "ENOENT" ? { kind: "missing" } : { kind: "invalid" };
   }
+}
+
+function readHolder(lockPath) {
+  const inspected = inspectHolder(lockPath);
+  return inspected.kind === "holder" ? inspected.value : null;
 }
 
 function describeHolder(holder) {
@@ -142,7 +149,11 @@ export function acquireWorkspaceWriteLock(root, options = {}) {
       if (error?.code !== "EEXIST") throw error;
     }
 
-    const holder = readHolder(lockPath);
+    // The prior holder can release after linkSync reports EEXIST. A missing
+    // lock is a normal retry; malformed metadata remains a hard stop.
+    const inspected = inspectHolder(lockPath);
+    if (inspected.kind === "missing") continue;
+    const holder = inspected.kind === "holder" ? inspected.value : null;
     const status = staleStatus(holder);
     if (status === "stale") {
       if (reclaimStaleLock(locksPath, lockPath, holder, deadline)) continue;
