@@ -1,0 +1,21 @@
+{
+  "name": "rsh",
+  "version": "0.1.5",
+  "description": "Use bounded, durable workspace memory without turning it into a task tracker.",
+  "author": {
+    "name": "RSH"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "RSH",
+    "shortDescription": "Bounded workspace memory for agents",
+    "longDescription": "Use RSH as bounded durable memory for long-running work without creating task or status state.",
+    "developerName": "RSH",
+    "category": "Productivity",
+    "capabilities": ["Write"],
+    "defaultPrompt": [
+      "Use RSH to retain reusable workspace memory while I work."
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "description": "Inject one bounded RSH Brief into root work sessions.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|clear|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$PLUGIN_ROOT/hooks/session-start.mjs\"",
+            "additionalContextLimit": 8192,
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

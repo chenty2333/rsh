@@ -2,9 +2,3 @@ node_modules/
 *.tgz
 .DS_Store
 coverage/
-
-# Local RSH workspace bootstrap
-/.agents/
-/.claude/
-/.rsh/
-/RESEARCH.md

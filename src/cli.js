@@ -1,167 +1,122 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
-import { initializeWorkspace } from "./core/workspace.js";
+import { initializeWorkspace, replaceIntent } from "./core/workspace.js";
 import { requireWorkspace } from "./core/paths.js";
-import { resumeResearch, findRecords, getItem, statusWorkspace, formatStatusMarkdown, formatFindMarkdown } from "./core/query.js";
-import { checkpoint, markRecord, replaceRecord } from "./core/record.js";
-import { deleteRecord, undoDelete } from "./core/delete.js";
-import { ITEM_ID_PATTERN, RECORD_ID_PATTERN } from "./core/ids.js";
-import { doctor, formatDoctorMarkdown } from "./core/doctor.js";
+import { parseMemoryDocument, rememberMemory, correctMemory, readMemory } from "./core/memory.js";
+import { buildBrief, searchMemories } from "./core/query.js";
 import { runMcp } from "./core/mcp.js";
 
 const require = createRequire(import.meta.url);
 const { version: VERSION } = require("../package.json");
+const COMMANDS = new Set(["init", "brief", "search", "read", "intent", "remember", "correct", "mcp", "help", "version"]);
+const MEMORY_ID = /^R-[0-9a-z]{5}$/;
 
-const COMMANDS = new Set(["init", "resume", "find", "checkpoint", "replace", "delete", "undo", "get", "mark", "status", "doctor", "mcp", "help", "version"]);
-const BOOLEAN_FLAGS = new Set(["all", "regex", "dry-run", "help", "version"]);
-const VALUE_FLAGS = new Set(["kind", "state", "limit"]);
-const GLOBAL_FLAGS = new Set(["help", "version"]);
-const FLAGS = {
-  init: new Set(), resume: new Set(["all"]),
-  find: new Set(["regex", "kind", "state", "limit"]),
-  checkpoint: new Set(), replace: new Set(), delete: new Set(["dry-run"]), undo: new Set(["dry-run"]), get: new Set(), mark: new Set(), status: new Set(),
-  doctor: new Set(), mcp: new Set(), help: new Set(), version: new Set()
-};
-const POSITIONALS = { init: 0, resume: 0, checkpoint: 1, replace: 2, delete: 1, undo: 0, get: 1, mark: 2, status: 0, doctor: 0, mcp: 0, help: 0, version: 0 };
-const KINDS = new Set(["result", "dead_end", "experience"]);
-const STATES = new Set(["unchecked", "checked", "withdrawn"]);
-const ITEM_ID = ITEM_ID_PATTERN;
-const RECORD_ID = RECORD_ID_PATTERN;
-
-function parseArgs(argv) {
-  const positional = [];
-  const flags = {};
-  let positionalOnly = false;
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index];
-    if (!positionalOnly && token === "--") { positionalOnly = true; continue; }
-    if (positionalOnly || !token.startsWith("--")) { positional.push(token); continue; }
-    const option = token.slice(2);
-    const separator = option.indexOf("=");
-    const name = separator < 0 ? option : option.slice(0, separator);
-    const inline = separator < 0 ? undefined : option.slice(separator + 1);
-    if (BOOLEAN_FLAGS.has(name)) {
-      if (inline !== undefined) throw new Error(`Flag --${name} does not take a value`);
-      flags[name] = true;
-      continue;
-    }
-    if (!VALUE_FLAGS.has(name)) throw new Error(`Unknown flag --${name}`);
-    const value = inline === undefined ? argv[index + 1] : inline;
-    if (!value || (inline === undefined && value.startsWith("--"))) throw new Error(`Flag --${name} requires a value`);
-    flags[name] = value;
-    if (inline === undefined) index += 1;
-  }
-  return { positional, flags };
-}
-
-function validate(command, positional, flags) {
-  for (const name of Object.keys(flags)) {
-    if (!GLOBAL_FLAGS.has(name) && !FLAGS[command].has(name)) throw new Error(`Unknown flag --${name} for command ${command}`);
-  }
-  if (flags.help || flags.version) return;
-  const expected = POSITIONALS[command];
-  if (command === "find") {
-    if (positional.length !== 1) throw new Error("Command find requires exactly 1 positional argument");
-  } else if (positional.length !== expected) {
-    throw new Error(`Command ${command} requires exactly ${expected} positional argument${expected === 1 ? "" : "s"}`);
-  }
-  if (flags.kind && !KINDS.has(flags.kind)) throw new Error("Flag --kind must be result, dead_end, or experience");
-  if (flags.state && !STATES.has(flags.state)) throw new Error("Flag --state must be unchecked, checked, or withdrawn");
-  if (flags.limit && !/^[1-9]\d*$/.test(flags.limit)) throw new Error("Flag --limit must be a positive integer");
-  if (command === "get" && !ITEM_ID.test(positional[0])) throw new Error("ID must be Q-, D-, or R- followed by exactly 3 or 5 lowercase base36 characters");
-  if ((command === "mark" || command === "replace" || command === "delete") && !RECORD_ID.test(positional[0])) throw new Error("Record ID must be R- followed by exactly 3 or 5 lowercase base36 characters");
-  if (command === "mark" && !STATES.has(positional[1])) throw new Error("Mark state must be unchecked, checked, or withdrawn");
-}
-
-function help() {
+function usage() {
   return `RSH ${VERSION}
 
 Usage:
-  rsh init
-  rsh resume [--all]
-  rsh find QUERY [--regex] [--kind result|dead_end|experience]
-                 [--state unchecked|checked|withdrawn] [--limit N]
-  rsh checkpoint FILE.md       (use - to read stdin)
-  rsh replace RECORD_ID FILE.md  (use - to read stdin)
-  rsh delete RECORD_ID [--dry-run]
-  rsh undo [--dry-run]
-  rsh get ID                    (Q-00000, D-00001, or R-00002; legacy 3-digit IDs also work)
-  rsh mark RECORD_ID unchecked|checked|withdrawn  (for example R-00002)
-  rsh status
-  rsh doctor
+  rsh init INTENT.md
+  rsh brief
+  rsh search QUERY
+  rsh read MEMORY_ID
+  rsh intent replace INTENT.md
+  rsh remember MEMORY.md
+  rsh correct MEMORY_ID MEMORY.md
   rsh mcp
   rsh help
-  rsh version`;
+  rsh version
+
+Use - instead of an input filename to read from standard input.`;
 }
 
-function formatValue(value) {
-  if (typeof value === "string") return value;
-  if (value === null || value === undefined) return "";
-  if (Array.isArray(value)) return value.map((item) => `- ${formatValue(item).replaceAll("\n", "\n  ")}`).join("\n");
-  if (typeof value === "object") {
-    return Object.entries(value).map(([key, item]) => {
-      if (item && typeof item === "object") return `## ${key.replaceAll("_", " ")}\n\n${formatValue(item)}`;
-      return `- ${key.replaceAll("_", " ")}: ${item ?? ""}`;
-    }).join("\n");
+function sourceText(file) {
+  return file === "-" ? fs.readFileSync(0, "utf8") : fs.readFileSync(file, "utf8");
+}
+
+function writeOutput(value) {
+  const output = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  process.stdout.write(output.endsWith("\n") ? output : `${output}\n`);
+}
+
+function exact(command, values, count) {
+  if (values.length !== count) {
+    throw new Error(`${command} requires exactly ${count} argument${count === 1 ? "" : "s"}`);
   }
-  return String(value);
 }
 
-function print(value, formatter = formatValue) {
-  const output = formatter(value);
-  if (output) console.log(output);
+function validateId(id) {
+  if (!MEMORY_ID.test(id ?? "")) {
+    throw new Error("Memory ID must be R- followed by 5 lowercase base36 characters");
+  }
 }
 
 export async function main(argv) {
-  const { positional, flags } = parseArgs(argv);
-  const command = positional.shift();
+  const [command, ...args] = argv;
   if (!command) {
-    for (const name of Object.keys(flags)) if (!GLOBAL_FLAGS.has(name)) throw new Error(`Unknown flag --${name}`);
-    console.log(flags.version ? VERSION : help());
+    writeOutput(usage());
     return;
   }
   if (!COMMANDS.has(command)) throw new Error(`Unknown command ${command}. Run \`rsh help\`.`);
-  validate(command, positional, flags);
-  if (flags.version || command === "version") { console.log(VERSION); return; }
-  if (flags.help || command === "help") { console.log(help()); return; }
+  if (args.some((argument) => argument.startsWith("--"))) throw new Error("RSH commands do not accept flags");
 
+  if (command === "help") {
+    exact(command, args, 0);
+    writeOutput(usage());
+    return;
+  }
+  if (command === "version") {
+    exact(command, args, 0);
+    writeOutput(VERSION);
+    return;
+  }
   if (command === "init") {
-    const result = initializeWorkspace(process.cwd());
-    console.log(`Initialized RSH workspace at ${result.root}`);
+    exact(command, args, 1);
+    initializeWorkspace(process.cwd(), sourceText(args[0]));
+    writeOutput(`Initialized RSH ${VERSION}.`);
     return;
   }
 
-  const root = requireWorkspace();
-  if (command === "resume") { print(resumeResearch(root, { all: Boolean(flags.all) })); return; }
-  if (command === "find") {
-    print(findRecords(root, positional[0] ?? "", {
-      regex: Boolean(flags.regex), kind: flags.kind,
-      state: flags.state, limit: flags.limit ? Number(flags.limit) : undefined
-    }), formatFindMarkdown);
+  const root = requireWorkspace(process.cwd());
+  if (command === "brief") {
+    exact(command, args, 0);
+    writeOutput(buildBrief(root));
     return;
   }
-  if (command === "checkpoint") {
-    const fromStdin = positional[0] === "-";
-    const input = fromStdin ? fs.readFileSync(0, "utf8") : positional[0];
-    print(checkpoint(root, input, { isText: fromStdin }));
+  if (command === "search") {
+    exact(command, args, 1);
+    writeOutput(searchMemories(root, args[0]));
     return;
   }
-  if (command === "replace") {
-    const fromStdin = positional[1] === "-";
-    const input = fromStdin ? fs.readFileSync(0, "utf8") : positional[1];
-    print(replaceRecord(root, positional[0], input, { isText: fromStdin }));
+  if (command === "read") {
+    exact(command, args, 1);
+    validateId(args[0]);
+    const memory = readMemory(root, args[0]);
+    if (!memory) throw new Error(`Memory ${args[0]} does not exist`);
+    writeOutput(memory.document);
     return;
   }
-  if (command === "delete") { print(deleteRecord(root, positional[0], { dryRun: Boolean(flags["dry-run"]) })); return; }
-  if (command === "undo") { print(undoDelete(root, { dryRun: Boolean(flags["dry-run"]) })); return; }
-  if (command === "get") { print(getItem(root, positional[0])); return; }
-  if (command === "mark") { print(markRecord(root, positional[0], positional[1])); return; }
-  if (command === "status") { print(statusWorkspace(root), formatStatusMarkdown); return; }
-  if (command === "doctor") {
-    const report = doctor(root);
-    print(report, formatDoctorMarkdown);
-    if (!report.ok) process.exitCode = 1;
+  if (command === "intent") {
+    if (args[0] !== "replace") throw new Error("intent requires replace");
+    exact("intent replace", args, 2);
+    replaceIntent(root, sourceText(args[1]));
+    writeOutput("Intent replaced.");
     return;
   }
-  if (command === "mcp") await runMcp({ root });
+  if (command === "remember") {
+    exact(command, args, 1);
+    const memory = rememberMemory(root, parseMemoryDocument(sourceText(args[0])));
+    writeOutput({ id: memory.id });
+    return;
+  }
+  if (command === "correct") {
+    exact(command, args, 2);
+    validateId(args[0]);
+    const memory = correctMemory(root, args[0], parseMemoryDocument(sourceText(args[1])));
+    writeOutput({ id: memory.id });
+    return;
+  }
+  if (command === "mcp") {
+    exact(command, args, 0);
+    await runMcp({ root });
+  }
 }

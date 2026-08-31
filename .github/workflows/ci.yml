@@ -19,8 +19,6 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-      - name: Install ripgrep
-        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: npm ci
       - run: npm run check
       - if: matrix.node-version == 22
@@ -31,14 +29,12 @@ jobs:
           PKG=$(npm pack --silent)
           TMP=$(mktemp -d)
           cd "$TMP"
-          git init -q
           npm install "$GITHUB_WORKSPACE/$PKG" --silent
-          ./node_modules/.bin/rsh init
-          printf '%s\n' '+++' 'kind = "result"' 'state = "unchecked"' '+++' '' '# CI result' '' 'The packaged checkpoint path works.' | ./node_modules/.bin/rsh checkpoint -
-          OLD_ID=$(basename "$(find .rsh/records -name 'R-*.md' -print -quit)" .md)
-          printf '%s\n' '+++' 'kind = "result"' 'state = "checked"' '+++' '' '# Corrected CI result' '' 'The packaged replacement path works.' | ./node_modules/.bin/rsh replace "$OLD_ID" -
-          ./node_modules/.bin/rsh get "$OLD_ID"
-          ./node_modules/.bin/rsh resume
-          ./node_modules/.bin/rsh find 'CI result'
-          ./node_modules/.bin/rsh status
-          ./node_modules/.bin/rsh doctor
+          printf '%s\n' '# CI Intent' '' 'Preserve the packaged 0.1.5 memory contract.' > INTENT.md
+          ./node_modules/.bin/rsh init INTENT.md
+          printf '%s\n' '+++' 'kind = "finding"' 'title = "Packaged memory path"' 'summary = "The installed CLI preserves one reusable conclusion."' 'scope = "packaged smoke test"' '+++' '# CI result' '' 'The packaged remember path works.' | ./node_modules/.bin/rsh remember -
+          MEMORY_ID=$(basename "$(find .rsh/records -name 'R-*.md' -print -quit)" .md)
+          printf '%s\n' '+++' 'kind = "finding"' 'title = "Corrected packaged memory"' 'summary = "The installed CLI replaces the named durable conclusion."' 'scope = "packaged smoke test"' '+++' '# Corrected CI result' '' 'The packaged correction path works.' | ./node_modules/.bin/rsh correct "$MEMORY_ID" -
+          ./node_modules/.bin/rsh read "$MEMORY_ID"
+          ./node_modules/.bin/rsh brief
+          ./node_modules/.bin/rsh search 'packaged memory'

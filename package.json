@@ -1,7 +1,7 @@
 {
   "name": "rsh-research",
-  "version": "0.1.2",
-  "description": "A lightweight, local, Git-native research state notebook for agents.",
+  "version": "0.1.5",
+  "description": "A lightweight, bounded memory layer for long-running agent work.",
   "type": "module",
   "bin": {
     "rsh": "bin/rsh.js"
@@ -10,6 +10,9 @@
     "bin/",
     "src/",
     "docs/",
+    ".codex-plugin/",
+    "hooks/",
+    "skills/",
     "README.md",
     "LICENSE"
   ],
@@ -26,19 +29,19 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "check": "node --check bin/rsh.js && find src -name '*.js' -print0 | xargs -0 -n1 node --check && npm test",
+    "check": "node --check bin/rsh.js && find src hooks -type f \\( -name '*.js' -o -name '*.mjs' \\) -print0 | xargs -0 -n1 node --check && npm test",
     "pack:dry": "npm pack --dry-run"
   },
   "engines": {
     "node": ">=20"
   },
   "keywords": [
-    "research",
-    "git",
+    "agents",
+    "context",
+    "memory",
     "mcp",
-    "markdown",
-    "ripgrep",
-    "research-state"
+    "codex",
+    "long-running-tasks"
   ],
   "license": "MIT",
   "dependencies": {

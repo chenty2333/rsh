@@ -1,60 +1,42 @@
 import fs from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 
-export function findGitRoot(start = process.cwd()) {
-  try {
-    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd: start,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    }).trim();
-  } catch {
-    return null;
-  }
-}
-
-export function findWorkspaceRoot(start = process.cwd()) {
+export function findWorkspace(start = process.cwd()) {
   let current = path.resolve(start);
+  if (fs.existsSync(current) && fs.statSync(current).isFile()) current = path.dirname(current);
   while (true) {
-    if (fs.lstatSync(path.join(current, ".rsh"), { throwIfNoEntry: false })) return current;
+    if (fs.existsSync(path.join(current, ".rsh", "manifest.toml"))) return current;
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
   }
 }
 
+export const findWorkspaceRoot = findWorkspace;
+
 export function requireWorkspace(start = process.cwd()) {
-  const root = findWorkspaceRoot(start);
+  const root = findWorkspace(start);
   if (!root) throw new Error("No RSH workspace found. Run `rsh init` first.");
+  assertWorkspaceLayout(root);
   return root;
 }
 
 export function workspacePaths(root) {
-  const rsh = path.join(root, ".rsh");
+  const resolved = path.resolve(root);
+  const state = path.join(resolved, ".rsh");
   return {
-    root,
-    research: path.join(root, "RESEARCH.md"),
-    rsh,
-    records: path.join(rsh, "records"),
-    locks: path.join(rsh, "locks"),
-    trash: path.join(rsh, "trash"),
-    sequence: path.join(rsh, "sequence.toml")
+    root: resolved,
+    intent: path.join(resolved, "RSH.md"),
+    state,
+    records: path.join(state, "records"),
+    manifest: path.join(state, "manifest.toml")
   };
 }
 
-function requireManagedPath(file, kind, label) {
-  const stat = fs.lstatSync(file, { throwIfNoEntry: false });
-  if (!stat || stat.isSymbolicLink() || (kind === "file" ? !stat.isFile() : !stat.isDirectory())) {
-    throw new Error(`Invalid RSH workspace: ${label} must be a real ${kind}`);
-  }
-}
-
 export function assertWorkspaceLayout(root) {
-  const paths = workspacePaths(path.resolve(root));
-  requireManagedPath(paths.rsh, "directory", ".rsh");
-  requireManagedPath(paths.research, "file", "RESEARCH.md");
-  requireManagedPath(paths.records, "directory", ".rsh/records");
-  requireManagedPath(paths.locks, "directory", ".rsh/locks");
+  const paths = workspacePaths(root);
+  if (!fs.existsSync(paths.intent) || !fs.statSync(paths.intent).isFile()) throw new Error("Invalid RSH workspace: missing RSH.md");
+  if (!fs.existsSync(paths.manifest) || !fs.statSync(paths.manifest).isFile()) throw new Error("Invalid RSH workspace: missing manifest.toml");
+  if (!fs.existsSync(paths.records) || !fs.statSync(paths.records).isDirectory()) throw new Error("Invalid RSH workspace: missing records directory");
   return paths;
 }
